@@ -21,3 +21,21 @@ review-fabric /path/to/repository BASE_SHA HEAD_SHA
 This creates an explicit escalation if no configured reviewers are supplied. Regenerate a report with `review-fabric summary .review-fabric/reviews/REVIEW_ID`.
 
 MVP non-goals: browser-token scraping, credential persistence in project files, automatic remediation, network publishing, and unbounded reviewer debate.
+
+## Explicit live-provider configuration
+
+Live execution is opt-in: supply a secret-free JSON binding file with `--config`; see
+`examples/light-model.review-fabric.json`. The Gemini Developer API and OpenAI-compatible
+(including xAI-compatible) transports use a stdlib HTTP client with a 10-second timeout and
+64 KiB response cap. Responses must be a JSON `{"findings": [...]}` object and are validated
+as findings before recording. Native SDK, Bedrock IAM, and OAuth paths safely escalate until a
+documented adapter is implemented.
+
+```sh
+review-fabric --config /private/path/review-fabric.json /path/to/repository BASE_SHA HEAD_SHA
+```
+
+An optional dotenv file must be inside the repository, untracked, and mode `0600`:
+`review-fabric --config … --env-file .private.env …`. Neither command prints or persists a
+credential. `scripts/live_smoke.py` requires an explicit `--config` and is intentionally not
+run by tests or CI.

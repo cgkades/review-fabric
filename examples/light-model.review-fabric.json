@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "bindings": {
+    "gemini-light": {
+      "provider": "gemini",
+      "transport": "gemini",
+      "model": "gemini-2.5-flash-lite",
+      "credential_source": "environment",
+      "credential_ref": "GEMINI_API_KEY"
+    }
+  },
+  "roles": {"correctness": "gemini-light"}
+}

@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import json
 import re
 from enum import StrEnum
+from hashlib import sha256
+from pathlib import Path
+from typing import Literal
 from urllib.parse import urlparse
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 
 class Transport(StrEnum):
@@ -26,7 +30,7 @@ _REFERENCE = re.compile(r"^(?:env:)?[A-Za-z_][A-Za-z0-9_.:-]*$")
 
 
 class ProviderBinding(BaseModel):
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
     provider: str = Field(min_length=1)
     transport: Transport
     model: str = Field(min_length=1)
@@ -61,19 +65,26 @@ class ProviderBinding(BaseModel):
             raise ValueError("credential_ref must be a named non-secret reference")
         if self.transport is Transport.BEDROCK_IAM and not self.region:
             raise ValueError("bedrock-iam transport requires region")
-        if self.transport in {
-            Transport.OPENAI_COMPATIBLE,
-            Transport.BEDROCK_OPENAI_COMPATIBLE,
-            Transport.AZURE_AI_FOUNDRY,
-        }:
-            if not self.endpoint:
-                raise ValueError("transport requires an endpoint")
-            parsed = urlparse(self.endpoint)
-            query_names = {
-                item.partition("=")[0].casefold() for item in parsed.query.split("&") if item
+        if (
+            self.transport
+            in {
+                Transport.OPENAI_COMPATIBLE,
+                Transport.XAI,
+                Transport.BEDROCK_OPENAI_COMPATIBLE,
+                Transport.AZURE_AI_FOUNDRY,
             }
-            if query_names & {"api_key", "apikey", "token", "secret", "password", "access_token"}:
-                raise ValueError("endpoint must not contain a query credential")
+            and not self.endpoint
+        ):
+            raise ValueError("transport requires an endpoint")
+        # Any configured endpoint can be reached by an HTTP transport. Validate it
+        # uniformly so a provider-specific API-key header is never sent to an
+        # attacker-controlled URL.
+        if self.endpoint:
+            parsed = urlparse(self.endpoint)
+            if parsed.params or parsed.query or parsed.fragment:
+                raise ValueError("endpoint must not contain a query or fragment")
+            if parsed.username or parsed.password:
+                raise ValueError("endpoint must not contain URL userinfo")
             local = parsed.hostname in {"localhost", "127.0.0.1", "::1"}
             if not parsed.hostname or (
                 parsed.scheme != "https"
@@ -82,14 +93,16 @@ class ProviderBinding(BaseModel):
                 raise ValueError("endpoint must use HTTPS except explicit loopback development")
         if self.transport is Transport.AZURE_AI_FOUNDRY and not self.deployment:
             raise ValueError("azure-ai-foundry transport requires deployment")
-        if self.transport is Transport.GEMINI and (not self.project or not self.location):
-            raise ValueError("gemini transport requires project and location")
+        if self.transport is Transport.GEMINI and (self.project or self.location):
+            raise ValueError(
+                "Gemini Developer transport does not support Vertex project or location"
+            )
         return self
 
 
 class ReviewConfiguration(BaseModel):
-    model_config = ConfigDict(frozen=True)
-    version: int = Field(ge=1)
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    version: Literal[1]
     bindings: dict[str, ProviderBinding]
     roles: dict[str, str]
 
@@ -122,3 +135,20 @@ class ReviewConfiguration(BaseModel):
             for role, name in sorted(self.roles.items())
             if (binding := self.bindings[name])
         }
+
+    @property
+    def identity(self) -> str:
+        """Return a stable secret-free configuration identity for artifact separation."""
+        return sha256(self.model_dump_json().encode()).hexdigest()
+
+
+def load_configuration(path: Path) -> ReviewConfiguration:
+    """Load JSON configuration containing references, never credential values."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError(f"invalid review configuration: {path}") from error
+    try:
+        return ReviewConfiguration.model_validate(data)
+    except ValidationError as error:
+        raise ValueError("invalid review configuration") from error

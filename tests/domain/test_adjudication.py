@@ -3,6 +3,8 @@ from __future__ import annotations
 import pytest
 
 from review_fabric.domain.adjudication import (
+    ChallengeCitation,
+    ChallengeDisposition,
     ChallengeResponse,
     DecisionOutcome,
     adjudicate,
@@ -31,14 +33,40 @@ def test_dispute_and_evidence_limited_challenge() -> None:
     dispute = make_dispute(group, "Does constraint cover retry?")
     assert dispute.question
     decision = adjudicate(
-        dispute, ChallengeResponse(claim="constraint proves it", evidence=("contract:a",))
+        dispute,
+        ChallengeResponse(
+            disposition=ChallengeDisposition.CONFIRM,
+            evidence=dispute.citations,
+        ),
     )
     assert decision.outcome is DecisionOutcome.CHANGE
-    with pytest.raises(ValueError, match="evidence"):
-        adjudicate(dispute, ChallengeResponse(claim="too cautious"))
+    with pytest.raises(ValueError, match="cited"):
+        adjudicate(
+            dispute,
+            ChallengeResponse(
+                disposition=ChallengeDisposition.CONFIRM,
+                evidence=(
+                    ChallengeCitation(path="untrusted.py", start_line=1, end_line=1, excerpt="no"),
+                ),
+            ),
+        )
 
 
 def test_unresolved_dispute_escalates_after_one_round() -> None:
     dispute = make_dispute(normalize_findings((material(),))[0], "Question")
     decision = adjudicate(dispute, None)
     assert decision.outcome is DecisionOutcome.ESCALATE
+
+
+@pytest.mark.parametrize(
+    "disposition", [ChallengeDisposition.REJECT, ChallengeDisposition.UNCERTAIN]
+)
+def test_nonconfirming_challenge_escalates_with_bounded_question(
+    disposition: ChallengeDisposition,
+) -> None:
+    dispute = make_dispute(normalize_findings((material(),))[0], "Question")
+
+    decision = adjudicate(dispute, ChallengeResponse(disposition=disposition))
+
+    assert decision.outcome is DecisionOutcome.ESCALATE
+    assert decision.unresolved_question == dispute.question

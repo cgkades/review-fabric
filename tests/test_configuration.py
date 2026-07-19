@@ -45,8 +45,21 @@ def test_configuration_rejects_literal_secrets(credential_ref: str) -> None:
         )
 
 
+def test_gemini_vertex_fields_are_rejected_until_a_safe_adapter_exists() -> None:
+    with pytest.raises(ValidationError, match="Gemini Developer"):
+        ProviderBinding(
+            provider="gemini",
+            transport=Transport.GEMINI,
+            model="model",
+            credential_source="environment",
+            credential_ref="GEMINI_API_KEY",
+            project="project",
+            location="us-central1",
+        )
+
+
 def test_configuration_rejects_endpoint_query_credentials() -> None:
-    with pytest.raises(ValidationError, match="query credential"):
+    with pytest.raises(ValidationError, match="query or fragment"):
         ProviderBinding(
             provider="gateway",
             transport=Transport.OPENAI_COMPATIBLE,

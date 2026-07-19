@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
+from typing import Protocol, cast
 
+from review_fabric.domain.adjudication import ChallengeResponse, adjudicate, make_dispute
 from review_fabric.domain.findings import Finding, Severity
 from review_fabric.domain.models import ReviewPackage
 from review_fabric.domain.normalization import normalize_findings
@@ -18,6 +20,10 @@ from review_fabric.reviewers.base import Reviewer
 class FirstPassResult:
     findings: tuple[Finding, ...]
     failures: tuple[dict[str, str], ...] = ()
+
+
+class ChallengeReviewer(Protocol):
+    def review_challenge(self, dispute: object) -> dict[str, object]: ...
 
 
 def run_first_pass(package: ReviewPackage, reviewers: tuple[Reviewer, ...]) -> FirstPassResult:
@@ -70,7 +76,7 @@ def execute_plan(
         result = run_first_pass(package, tuple(reviewers[role.value] for role in plan.roles))
     except Exception as error:  # Provider SDKs use provider-specific exception hierarchies.
         kind = _failure_kind(error)
-        store.record_event("execution-error", {"kind": kind, "error": str(error)})
+        store.record_event("execution-error", {"kind": kind})
         store.record_event("terminal", {"outcome": "ESCALATE", "reason": "review execution failed"})
         return FirstPassResult((), ({"kind": kind},))
 
@@ -107,21 +113,58 @@ def execute_plan(
             ]
         },
     )
-    for group in groups:
-        representative = group.findings[0]
+    if plan.challenge_limit == 0:
+        for group in groups:
+            representative = group.findings[0]
+            store.record_event(
+                "decision",
+                {
+                    "outcome": "CHANGE",
+                    "group_id": group.id,
+                    "accepted_evidence": [
+                        citation.model_dump(mode="json") for citation in representative.evidence
+                    ],
+                    "remediation": representative.remediation,
+                    "verification": representative.verification,
+                },
+            )
         store.record_event(
-            "decision",
-            {
-                "outcome": "CHANGE",
-                "group_id": group.id,
-                "accepted_evidence": [
-                    citation.model_dump(mode="json") for citation in representative.evidence
-                ],
-                "remediation": representative.remediation,
-                "verification": representative.verification,
-            },
+            "terminal", {"outcome": "CHANGE", "reason": "material evidence-backed finding"}
+        )
+        return result
+    escalated = False
+    for group in groups[:1]:
+        dispute = make_dispute(group, "Is the evidence sufficient to require remediation?")
+        store.record_event("challenge", dispute.model_dump(mode="json"))
+        reviewer = (
+            reviewers[group.findings[0].reviewer_id]
+            if group.findings[0].reviewer_id in reviewers
+            else reviewers[plan.roles[0].value]
+        )
+        try:
+            response_data = cast(ChallengeReviewer, reviewer).review_challenge(dispute)
+            response = ChallengeResponse.model_validate(response_data)
+            store.record_event("challenge-response", response.model_dump(mode="json"))
+        except Exception as error:
+            kind = _failure_kind(error)
+            store.record_event("challenge-response", {"status": "unavailable", "kind": kind})
+            decision = adjudicate(dispute, None)
+            escalated = True
+        else:
+            decision = adjudicate(dispute, response)
+            if decision.outcome.value == "ESCALATE":
+                escalated = True
+        store.record_event("adjudication", decision.model_dump(mode="json"))
+    if len(groups) > 1:
+        escalated = True
+        store.record_event(
+            "adjudication", {"outcome": "ESCALATE", "reason": "challenge limit reached"}
         )
     store.record_event(
-        "terminal", {"outcome": "CHANGE", "reason": "material evidence-backed finding"}
+        "terminal",
+        {
+            "outcome": "ESCALATE" if escalated else "CHANGE",
+            "reason": "bounded evidence adjudication",
+        },
     )
     return result

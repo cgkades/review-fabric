@@ -6,6 +6,9 @@ import subprocess
 import sys
 from pathlib import Path
 
+from review_fabric.cli import run
+from review_fabric.configuration import ProviderBinding, ReviewConfiguration, Transport
+
 
 def git(repository: Path, *arguments: str) -> str:
     return subprocess.run(
@@ -57,6 +60,59 @@ def test_cli_creates_replayable_incomplete_review_for_explicit_range(tmp_path: P
     assert len((artifact / "events.jsonl").read_text().splitlines()) == 4
 
 
+def test_cli_records_safe_configured_bindings(tmp_path: Path) -> None:
+    repository = tmp_path / "fixture"
+    repository.mkdir()
+    git(repository, "init", "-q")
+    git(repository, "config", "user.email", "test@example.invalid")
+    git(repository, "config", "user.name", "Test")
+    (repository / "example.py").write_text("value = 1\n")
+    git(repository, "add", ".")
+    git(repository, "commit", "-qm", "base")
+    base = git(repository, "rev-parse", "HEAD")
+    (repository / "example.py").write_text("value = 2\n")
+    git(repository, "commit", "-am", "change", "-q")
+    head = git(repository, "rev-parse", "HEAD")
+    config = repository / "review-fabric.json"
+    config.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "bindings": {
+                    "fake": {
+                        "provider": "local",
+                        "transport": "fake",
+                        "model": "fake",
+                        "credential_source": "none",
+                    }
+                },
+                "roles": {"correctness": "fake"},
+            }
+        )
+    )
+
+    completed = subprocess.run(
+        (
+            sys.executable,
+            "-m",
+            "review_fabric.cli",
+            "--config",
+            str(config),
+            str(repository),
+            base,
+            head,
+        ),
+        check=False,
+        capture_output=True,
+        text=True,
+        env={**os.environ, "PYTHONPATH": str(Path.cwd() / "src")},
+    )
+
+    assert completed.returncode == 0, completed.stdout
+    events = (Path(completed.stdout.strip()) / "events.jsonl").read_text()
+    assert '"provider":"local"' in events
+
+
 def test_cli_rejects_invalid_range_without_creating_artifact(tmp_path: Path) -> None:
     completed = subprocess.run(
         (sys.executable, "-m", "review_fabric.cli", str(tmp_path), "missing", "HEAD"),
@@ -68,3 +124,65 @@ def test_cli_rejects_invalid_range_without_creating_artifact(tmp_path: Path) -> 
 
     assert completed.returncode != 0
     assert not (tmp_path / ".review-fabric").exists()
+
+
+def test_missing_credential_persists_redacted_terminal_artifact(
+    tmp_path: Path, monkeypatch
+) -> None:
+    repository = tmp_path / "fixture"
+    repository.mkdir()
+    git(repository, "init", "-q")
+    git(repository, "config", "user.email", "test@example.invalid")
+    git(repository, "config", "user.name", "Test")
+    (repository / "example.py").write_text("value = 1\n")
+    git(repository, "add", ".")
+    git(repository, "commit", "-qm", "base")
+    base = git(repository, "rev-parse", "HEAD")
+    (repository / "example.py").write_text("value = 2\n")
+    git(repository, "commit", "-am", "change", "-q")
+    head = git(repository, "rev-parse", "HEAD")
+    monkeypatch.delenv("MISSING_REVIEW_KEY", raising=False)
+    configuration = ReviewConfiguration(
+        version=1,
+        bindings={
+            "live": ProviderBinding(
+                provider="gemini",
+                transport=Transport.GEMINI,
+                model="light",
+                credential_source="environment",
+                credential_ref="MISSING_REVIEW_KEY",
+            )
+        },
+        roles={"correctness": "live"},
+    )
+
+    artifact = run(repository, base, head, configuration=configuration)
+
+    events = (artifact / "events.jsonl").read_text()
+    assert '"kind":"credential-unavailable"' in events
+    assert "MISSING_REVIEW_KEY" not in events
+    assert json.loads(events.splitlines()[-1])["payload"]["outcome"] == "ESCALATE"
+    assert run(repository, base, head, configuration=configuration) == artifact
+
+
+def test_existing_nonterminal_artifact_is_closed_with_same_identity(tmp_path: Path) -> None:
+    repository = tmp_path / "fixture"
+    repository.mkdir()
+    git(repository, "init", "-q")
+    git(repository, "config", "user.email", "test@example.invalid")
+    git(repository, "config", "user.name", "Test")
+    (repository / "example.py").write_text("value = 1\n")
+    git(repository, "add", ".")
+    git(repository, "commit", "-qm", "base")
+    base = git(repository, "rev-parse", "HEAD")
+    (repository / "example.py").write_text("value = 2\n")
+    git(repository, "commit", "-am", "change", "-q")
+    head = git(repository, "rev-parse", "HEAD")
+    artifact = run(repository, base, head)
+    events = (artifact / "events.jsonl").read_text().splitlines()
+    (artifact / "events.jsonl").write_text("\n".join(events[:-1]) + "\n")
+
+    assert run(repository, base, head) == artifact
+    final = json.loads((artifact / "events.jsonl").read_text().splitlines()[-1])
+    assert final["phase"] == "terminal"
+    assert final["payload"]["outcome"] == "ESCALATE"

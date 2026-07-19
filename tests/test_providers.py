@@ -46,8 +46,8 @@ def test_bedrock_iam_uses_workload_chain_without_static_credential() -> None:
     [
         (Transport.OPENAI, {}),
         (Transport.ANTHROPIC, {}),
-        (Transport.XAI, {}),
-        (Transport.GEMINI, {"project": "project", "location": "us-central1"}),
+        (Transport.XAI, {"endpoint": "https://xai.example.test/v1"}),
+        (Transport.GEMINI, {}),
         (
             Transport.AZURE_AI_FOUNDRY,
             {"endpoint": "https://azure.example.test", "deployment": "deployment"},

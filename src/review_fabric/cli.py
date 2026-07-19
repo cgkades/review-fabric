@@ -7,13 +7,16 @@ import json
 import sys
 from pathlib import Path
 
-from review_fabric.credentials import auth_remove, auth_set, auth_status
+from review_fabric.configuration import ReviewConfiguration, Transport, load_configuration
+from review_fabric.credentials import auth_remove, auth_set, auth_status, resolve_credential
 from review_fabric.domain.models import ReviewPackage
 from review_fabric.domain.policy import ReviewPolicy
 from review_fabric.errors import ReviewFabricError
 from review_fabric.evidence.artifacts import ArtifactStore
 from review_fabric.evidence.git import collect_git_evidence
 from review_fabric.orchestration import execute_plan
+from review_fabric.reviewers.base import FakeReviewer, RoleRubric
+from review_fabric.reviewers.providers import ProviderReviewer
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -27,6 +30,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--constraint", action="append", default=[], help="non-secret review constraint"
     )
     parser.add_argument("--env-file", type=Path, help="private, Git-ignored dotenv file")
+    parser.add_argument(
+        "--config", type=Path, help="explicit secret-free JSON provider configuration"
+    )
     return parser
 
 
@@ -38,7 +44,15 @@ def _auth_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def run(repository: Path, base: str, head: str, constraints: tuple[str, ...] = ()) -> Path:
+def run(
+    repository: Path,
+    base: str,
+    head: str,
+    constraints: tuple[str, ...] = (),
+    *,
+    configuration: ReviewConfiguration | None = None,
+    env_file: Path | None = None,
+) -> Path:
     evidence = collect_git_evidence(repository, base, head)
     package = ReviewPackage(
         repository_root=evidence.repository_root,
@@ -47,16 +61,50 @@ def run(repository: Path, base: str, head: str, constraints: tuple[str, ...] = (
         patch_digest=evidence.patch_digest,
         selected_paths=evidence.changed_paths,
         acceptance_criteria=(),
-        constraints=("read-only", *constraints),
+        constraints=(
+            "read-only",
+            *constraints,
+            *(() if configuration is None else (f"configuration:{configuration.identity}",)),
+        ),
         command_results=(),
     )
     artifact_directory = ArtifactStore.directory_for(Path(evidence.repository_root), package)
     if artifact_directory.exists():
-        return ArtifactStore.open(Path(evidence.repository_root), package).directory
+        store = ArtifactStore.open(Path(evidence.repository_root), package)
+        events = (store.directory / "events.jsonl").read_text(encoding="utf-8").splitlines()
+        if any(json.loads(event).get("phase") == "terminal" for event in events):
+            return store.directory
+        # A previous process died mid-run. Re-execution could duplicate external
+        # provider calls, so close this identity deterministically instead.
+        store.record_event("execution-error", {"kind": "incomplete-artifact"})
+        store.record_event("terminal", {"outcome": "ESCALATE", "reason": "prior run incomplete"})
+        return store.directory
     store = ArtifactStore.create(Path(evidence.repository_root), package, patch=evidence.patch)
     store.record_event("package", {"selected_paths": list(package.selected_paths)})
+    plan = ReviewPolicy.default().select_plan(package.selected_paths)
+    reviewers = {}
+    try:
+        if configuration:
+            configuration.validate_selected_roles(tuple(role.value for role in plan.roles))
+            store.record_event("configured-bindings", configuration.manifest_bindings())
+            for role in plan.roles:
+                binding = configuration.binding_for(role.value)
+                rubric = RoleRubric(role.value, f"Evidence-based {role.value} review")
+                if binding.transport is Transport.FAKE:
+                    reviewers[role.value] = FakeReviewer(rubric)
+                else:
+                    credential = resolve_credential(
+                        binding, repository=repository, env_file=env_file
+                    )
+                    reviewers[role.value] = ProviderReviewer(binding, credential, rubric)
+    except (ReviewFabricError, OSError, ValueError):
+        # Credential/configuration exception text may contain a path or provider
+        # detail; artifacts persist a stable category only.
+        store.record_event("execution-error", {"kind": "credential-unavailable"})
+        store.record_event("terminal", {"outcome": "ESCALATE", "reason": "reviewer setup failed"})
+        return store.directory
     # No configured adapter is silently replaced with an ACCEPTing fake reviewer.
-    execute_plan(package, ReviewPolicy.default().select_plan(package.selected_paths), {}, store)
+    execute_plan(package, plan, reviewers, store)
     return store.directory
 
 
@@ -97,7 +145,17 @@ def main(arguments: list[str] | None = None) -> int:
         parsed = build_parser().parse_args(arguments)
         if not (parsed.repository and parsed.base and parsed.head):
             raise ReviewFabricError("repository, base, and head are required")
-        print(run(parsed.repository, parsed.base, parsed.head, tuple(parsed.constraint)))
+        configuration = load_configuration(parsed.config) if parsed.config else None
+        print(
+            run(
+                parsed.repository,
+                parsed.base,
+                parsed.head,
+                tuple(parsed.constraint),
+                configuration=configuration,
+                env_file=parsed.env_file,
+            )
+        )
         return 0
     except (ReviewFabricError, OSError, ValueError) as error:
         print(f"review-fabric: {error}", flush=True)
