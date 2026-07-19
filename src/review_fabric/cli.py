@@ -40,6 +40,9 @@ def run(repository: Path, base: str, head: str, constraints: tuple[str, ...] = (
         constraints=("read-only", *constraints),
         command_results=(),
     )
+    artifact_directory = ArtifactStore.directory_for(Path(evidence.repository_root), package)
+    if artifact_directory.exists():
+        return ArtifactStore.open(Path(evidence.repository_root), package).directory
     store = ArtifactStore.create(Path(evidence.repository_root), package, patch=evidence.patch)
     store.record_event(
         "package",

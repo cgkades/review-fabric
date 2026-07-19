@@ -44,6 +44,18 @@ def test_cli_creates_replayable_fake_review_for_explicit_range(tmp_path: Path) -
     decision = json.loads((artifact / "events.jsonl").read_text().splitlines()[-1])
     assert decision["payload"]["outcome"] == "ACCEPT"
 
+    repeated = subprocess.run(
+        (sys.executable, "-m", "review_fabric.cli", str(repository), base, head),
+        check=False,
+        capture_output=True,
+        text=True,
+        env={**os.environ, "PYTHONPATH": str(Path.cwd() / "src")},
+    )
+
+    assert repeated.returncode == 0, repeated.stderr
+    assert Path(repeated.stdout.strip()) == artifact
+    assert len((artifact / "events.jsonl").read_text().splitlines()) == 3
+
 
 def test_cli_rejects_invalid_range_without_creating_artifact(tmp_path: Path) -> None:
     completed = subprocess.run(

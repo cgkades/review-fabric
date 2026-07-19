@@ -39,10 +39,29 @@ class ArtifactStore:
     review_id: str
 
     @classmethod
+    def directory_for(cls, root: Path, package: ReviewPackage) -> Path:
+        return root / ".review-fabric" / "reviews" / package.review_id
+
+    @classmethod
+    def open(cls, root: Path, package: ReviewPackage) -> ArtifactStore:
+        """Open an existing artifact only when it belongs to the exact package."""
+        directory = cls.directory_for(root, package)
+        try:
+            manifest = json.loads((directory / "manifest.json").read_text(encoding="utf-8"))
+        except (FileNotFoundError, json.JSONDecodeError) as error:
+            raise InvalidReviewPackageError("existing artifact has no valid manifest") from error
+        if manifest.get("review_id") != package.review_id:
+            raise InvalidReviewPackageError("existing artifact does not match review package")
+        return cls(directory=directory, review_id=package.review_id)
+
+    @classmethod
     def create(cls, root: Path, package: ReviewPackage, *, patch: str) -> ArtifactStore:
         """Create a uniquely named local artifact directory before reviewer execution."""
-        directory = root / ".review-fabric" / "reviews" / package.review_id
-        directory.mkdir(parents=True, exist_ok=False)
+        directory = cls.directory_for(root, package)
+        try:
+            directory.mkdir(parents=True, exist_ok=False)
+        except FileExistsError as error:
+            raise InvalidReviewPackageError("artifact already exists for review package") from error
         manifest = {
             "schema_version": _SCHEMA_VERSION,
             "review_id": package.review_id,
