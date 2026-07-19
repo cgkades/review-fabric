@@ -1,0 +1,19 @@
+schema: spec-driven
+
+context: |
+  Project: Review Fabric — an evidence-driven, multi-agent code-review orchestrator.
+  Tech stack: Python 3.12+, Pydantic, pytest, CrewAI Flows as an optional orchestration adapter.
+  Architecture: framework-neutral domain protocol and artifacts; LLM providers are adapters.
+  Safety: review runs are read-only. No code modification, GitHub write-back, merge, or external side effect in the MVP. Credentials are references only; no secret values, tokens, or browser session data may be stored in project files or review artifacts.
+  Quality: material findings need precise evidence. A test/reproduction or code/contract citation outweighs model consensus.
+  Workflow: artifacts are local and replayable; no agent conversation may be unbounded.
+
+rules:
+  proposal:
+    - Include explicit non-goals for every externally observable behavior.
+  design:
+    - Record deterministic-vs-LLM boundaries and an alternative for each framework dependency.
+  specs:
+    - Every material requirement MUST define a testable scenario.
+  tasks:
+    - Keep tasks small, test-first where code is added, and identify exact verification commands.

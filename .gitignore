@@ -1,0 +1,20 @@
+# Python environments and tooling
+.venv/
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+*.py[cod]
+
+# Build and package artifacts
+build/
+dist/
+*.egg-info/
+
+# Local Review Fabric artifacts
+.review-fabric/
+
+# Local credentials: keep the template, ignore all real dotenv files
+.env
+.env.*
+!.env.example
