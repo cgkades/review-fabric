@@ -81,7 +81,12 @@ def _run_git(repository: Path, *arguments: str) -> str:
 
 
 def _reject_secret_material(patch: str) -> None:
-    if any(pattern.search(patch) for pattern in _SECRET_PATTERNS):
+    added_content = "\n".join(
+        line[1:]
+        for line in patch.splitlines()
+        if line.startswith("+") and not line.startswith("+++")
+    )
+    if any(pattern.search(added_content) for pattern in _SECRET_PATTERNS):
         raise InvalidReviewPackageError("Git patch contains potential secret material")
 
 

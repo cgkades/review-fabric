@@ -99,3 +99,16 @@ def test_collect_git_evidence_rejects_committed_secret_material(repository: Path
         collect_git_evidence(repository, "HEAD~1", "HEAD")
 
     assert "sk-proj" not in str(error.value)
+
+
+def test_collect_git_evidence_allows_removing_a_preexisting_secret(repository: Path) -> None:
+    secret_file = repository / "config.env"
+    secret_file.write_text("OPENAI_API_KEY=" + "sk-" + "proj-" + "x" * 30 + "\n")
+    git(repository, "add", "config.env")
+    git(repository, "commit", "-m", "historical credential")
+    git(repository, "rm", "config.env")
+    git(repository, "commit", "-m", "remove credential")
+
+    evidence = collect_git_evidence(repository, "HEAD~1", "HEAD")
+
+    assert "config.env" in evidence.changed_paths
