@@ -16,9 +16,9 @@
 
 - [x] 3.1 Write failing schema tests for `Finding`, `Evidence`, severity, remediation, confidence, and verification criteria in `tests/domain/test_findings.py`.
 - [x] 3.2 Implement finding and evidence domain models plus validation that rejects evidence-free blocker/concern findings. Run `pytest tests/domain/test_findings.py -v`.
-- [ ] 3.3 Define the provider-neutral `Reviewer` protocol and role-rubric input in `src/review_fabric/reviewers/base.py`; add a deterministic fake reviewer for tests.
-- [ ] 3.4 Write a test proving first-pass reviewer invocations receive the package and their own role rubric but no peer output.
-- [ ] 3.5 Implement the first-pass fan-out service using fake reviewers and verify the isolation test passes.
+- [x] 3.3 Define the provider-neutral `Reviewer` protocol and role-rubric input in `src/review_fabric/reviewers/base.py`; add a deterministic fake reviewer for tests.
+- [x] 3.4 Write a test proving first-pass reviewer invocations receive the package and their own role rubric but no peer output.
+- [x] 3.5 Implement the first-pass fan-out service using fake reviewers and verify the isolation test passes.
 
 ## 4. Policy, normalization, and adjudication state machine
 
@@ -31,14 +31,14 @@
 
 ## 5. Durable artifacts and summary
 
-- [ ] 5.1 Write tests that a review artifact contains a manifest, append-only schema-versioned events, and deterministic summary regeneration in `tests/artifacts/test_store.py`.
-- [ ] 5.2 Implement `.review-fabric/reviews/<review-id>/` artifact storage and atomic single-record writes in `src/review_fabric/evidence/artifacts.py`. Run `pytest tests/artifacts/test_store.py -v`.
-- [ ] 5.3 Implement a Markdown summary renderer that uses only persisted machine-readable records. Add a deletion-and-regeneration test.
+- [x] 5.1 Write tests that a review artifact contains a manifest, append-only schema-versioned events, and deterministic summary regeneration in `tests/artifacts/test_store.py`.
+- [x] 5.2 Implement `.review-fabric/reviews/<review-id>/` artifact storage and atomic single-record writes in `src/review_fabric/evidence/artifacts.py`. Run `pytest tests/artifacts/test_store.py -v`.
+- [x] 5.3 Implement a Markdown summary renderer that uses only persisted machine-readable records. Add a deletion-and-regeneration test.
 - [ ] 5.4 Implement structured execution failure events for timeout, invalid output, denied mutation, and provider error; verify no failure path fabricates a verdict.
 
 ## 6. Provider and credential configuration
 
-- [ ] 6.1 Define Pydantic configuration schemas for policies, logical roles, provider bindings, transport settings, and non-secret credential references. Add tests that reject literal secret values in configuration.
+- [x] 6.1 Define Pydantic configuration schemas for policies, logical roles, provider bindings, transport settings, and non-secret credential references. Add tests that reject literal secret values in configuration.
 - [ ] 6.2 Implement CLI-first credential resolution and lifecycle commands (`auth set`, `auth status`, `auth remove`) using the OS keychain for interactive API-key profiles, standard workload chains for IAM, process environment and Git-ignored dotenv files for direct/headless runs, and optional explicit secret-manager references. Define environment-over-dotenv precedence. Test that no secret is accepted through CLI arguments or written to config/artifacts/logs, and that tracked or unsafe dotenv files are rejected.
 - [ ] 6.3 Implement config loading and startup validation that resolves role-to-binding mappings without resolving secret values. Add tests for missing role bindings, invalid provider fields, and manifest-safe provider metadata.
 - [ ] 6.4 Implement secret-redaction utilities and tests covering API keys, bearer tokens, authorization headers, AWS secret keys, OAuth tokens, and endpoint query credentials.
@@ -50,7 +50,7 @@
 
 - [ ] 7.1 Implement an orchestration service that executes the selected plan using only the provider-neutral reviewer interface and persists each phase transition. Verify end-to-end behavior with deterministic fixture reviewers.
 - [ ] 7.2 Add the CrewAI Flow adapter in `src/review_fabric/reviewers/crewai.py`, isolated from domain modules. Verify core tests run without CrewAI installed or configured.
-- [ ] 7.3 Add a CLI command that accepts a repository path and explicit base/head revisions, validates inputs, creates artifacts, and exits nonzero on invalid package construction. Cover with CLI tests.
+- [x] 7.3 Add a CLI command that accepts a repository path and explicit base/head revisions, validates inputs, creates artifacts, and exits nonzero on invalid package construction. Cover with CLI tests.
 - [ ] 7.4 Add a CLI command to regenerate a stored review summary and verify output matches the original generated summary.
 
 ## 8. Evaluation fixtures and operational documentation

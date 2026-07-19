@@ -45,6 +45,8 @@ def test_first_pass_isolates_reviewers_and_returns_valid_findings() -> None:
     assert result.findings == first.findings
     assert first.received_peer_outputs == ()
     assert second.received_peer_outputs == ()
+    assert first.received_rubrics == [first.rubric]
+    assert second.received_rubrics == [second.rubric]
     assert first.received_packages == [package()]
     assert second.received_packages == [package()]
 

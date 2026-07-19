@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import subprocess
+import sys
 from pathlib import Path
 
 from review_fabric.domain.models import CommandResult
@@ -27,13 +28,29 @@ def capture_command(repository: Path, command: tuple[str, ...]) -> CommandResult
     if not command or not _is_allowed(command):
         raise DeniedMutationError("command is not allowlisted for read-only evidence capture")
 
-    completed = subprocess.run(
-        command,
-        cwd=repository,
-        capture_output=True,
-        check=False,
-        encoding="utf-8",
-    )
+    executable_command = command
+    if command[0] in {"pytest", "ruff", "mypy"}:
+        executable_command = (sys.executable, "-m", *command)
+    try:
+        completed = subprocess.run(
+            executable_command,
+            cwd=repository,
+            capture_output=True,
+            check=False,
+            encoding="utf-8",
+            timeout=30,
+        )
+    except FileNotFoundError:
+        return CommandResult(
+            command=command, exit_code=127, stdout="", stderr="command unavailable"
+        )
+    except subprocess.TimeoutExpired as error:
+        return CommandResult(
+            command=command,
+            exit_code=124,
+            stdout=error.stdout or "",
+            stderr=error.stderr or "command timed out",
+        )
     return CommandResult(
         command=command,
         exit_code=completed.returncode,

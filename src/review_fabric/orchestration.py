@@ -19,7 +19,7 @@ def run_first_pass(package: ReviewPackage, reviewers: tuple[Reviewer, ...]) -> F
     """Invoke each reviewer independently with only the frozen package."""
     findings: list[Finding] = []
     for reviewer in reviewers:
-        reviewer_findings = reviewer.review(package)
+        reviewer_findings = reviewer.review(package, reviewer.rubric)
         if any(finding.package_id != package.review_id for finding in reviewer_findings):
             raise InvalidReviewerOutputError("reviewer finding references a different package")
         findings.extend(reviewer_findings)
