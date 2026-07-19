@@ -36,6 +36,7 @@ class Finding(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     package_id: str = Field(pattern=r"^[0-9a-f]{64}$")
+    reviewer_id: str = Field(default="unknown", min_length=1)
     severity: Severity
     title: str = Field(min_length=1)
     claim: str = Field(min_length=1)

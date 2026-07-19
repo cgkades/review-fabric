@@ -29,8 +29,7 @@ def test_store_writes_immutable_manifest_append_only_events_and_regenerates_summ
 
     manifest = json.loads((store.directory / "manifest.json").read_text())
     events = [
-        json.loads(line)
-        for line in (store.directory / "events.jsonl").read_text().splitlines()
+        json.loads(line) for line in (store.directory / "events.jsonl").read_text().splitlines()
     ]
     original = (store.directory / "summary.md").read_text()
     (store.directory / "summary.md").unlink()

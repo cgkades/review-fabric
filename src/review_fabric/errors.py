@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+from review_fabric.redaction import redact
+
 
 class ReviewFabricError(Exception):
     """Base class for errors that can be persisted as review events."""
 
     def to_record(self) -> dict[str, str]:
-        return {"error_type": type(self).__name__, "message": str(self)}
+        return {"error_type": type(self).__name__, "message": redact(str(self))}
 
 
 class InvalidReviewPackageError(ReviewFabricError):

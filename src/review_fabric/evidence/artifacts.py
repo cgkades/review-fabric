@@ -11,6 +11,7 @@ from typing import Any
 
 from review_fabric.domain.models import ReviewPackage
 from review_fabric.errors import InvalidReviewPackageError
+from review_fabric.redaction import redact
 from review_fabric.serialization import canonical_json_bytes
 
 _SCHEMA_VERSION = 1
@@ -62,12 +63,14 @@ class ArtifactStore:
             directory.mkdir(parents=True, exist_ok=False)
         except FileExistsError as error:
             raise InvalidReviewPackageError("artifact already exists for review package") from error
-        manifest = {
-            "schema_version": _SCHEMA_VERSION,
-            "review_id": package.review_id,
-            "package": {**package.model_dump(mode="json"), "review_id": package.review_id},
-            "patch": patch,
-        }
+        manifest = redact(
+            {
+                "schema_version": _SCHEMA_VERSION,
+                "review_id": package.review_id,
+                "package": {**package.model_dump(mode="json"), "review_id": package.review_id},
+                "patch": patch,
+            }
+        )
         _write_new(directory / "manifest.json", canonical_json_bytes(manifest) + b"\n")
         _write_new(directory / "events.jsonl", b"")
         store = cls(directory=directory, review_id=package.review_id)
@@ -83,7 +86,7 @@ class ArtifactStore:
             "review_id": self.review_id,
             "timestamp": _timestamp(),
             "phase": phase,
-            "payload": payload,
+            "payload": redact(payload),
         }
         with (self.directory / "events.jsonl").open("ab") as events:
             events.write(canonical_json_bytes(event) + b"\n")

@@ -45,6 +45,18 @@ def test_configuration_rejects_literal_secrets(credential_ref: str) -> None:
         )
 
 
+def test_configuration_rejects_endpoint_query_credentials() -> None:
+    with pytest.raises(ValidationError, match="query credential"):
+        ProviderBinding(
+            provider="gateway",
+            transport=Transport.OPENAI_COMPATIBLE,
+            model="model",
+            credential_source="environment",
+            credential_ref="OPENAI_API_KEY",
+            endpoint="https://api.example.test/v1?api_key=not-allowed",
+        )
+
+
 def test_generic_provider_requires_secure_endpoint() -> None:
     with pytest.raises(ValidationError, match="HTTPS"):
         ProviderBinding(

@@ -13,7 +13,7 @@ def git(repository: Path, *arguments: str) -> str:
     ).stdout.strip()
 
 
-def test_cli_creates_replayable_fake_review_for_explicit_range(tmp_path: Path) -> None:
+def test_cli_creates_replayable_incomplete_review_for_explicit_range(tmp_path: Path) -> None:
     repository = tmp_path / "fixture"
     repository.mkdir()
     git(repository, "init", "-q")
@@ -42,7 +42,7 @@ def test_cli_creates_replayable_fake_review_for_explicit_range(tmp_path: Path) -
     assert manifest["package"]["base_sha"] == base
     assert manifest["package"]["head_sha"] == head
     decision = json.loads((artifact / "events.jsonl").read_text().splitlines()[-1])
-    assert decision["payload"]["outcome"] == "ACCEPT"
+    assert decision["payload"]["outcome"] == "ESCALATE"
 
     repeated = subprocess.run(
         (sys.executable, "-m", "review_fabric.cli", str(repository), base, head),
@@ -54,7 +54,7 @@ def test_cli_creates_replayable_fake_review_for_explicit_range(tmp_path: Path) -
 
     assert repeated.returncode == 0, repeated.stderr
     assert Path(repeated.stdout.strip()) == artifact
-    assert len((artifact / "events.jsonl").read_text().splitlines()) == 3
+    assert len((artifact / "events.jsonl").read_text().splitlines()) == 4
 
 
 def test_cli_rejects_invalid_range_without_creating_artifact(tmp_path: Path) -> None:
