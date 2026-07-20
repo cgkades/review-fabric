@@ -23,6 +23,7 @@ class Transport(StrEnum):
     OPENAI_COMPATIBLE = "openai-compatible"
     BEDROCK_IAM = "bedrock-iam"
     BEDROCK_OPENAI_COMPATIBLE = "bedrock-openai-compatible"
+    BEDROCK_CONVERSE = "bedrock-converse"
     OAUTH = "oauth"
 
 
@@ -63,8 +64,11 @@ class ProviderBinding(BaseModel):
             or self.credential_ref.lower().startswith(("sk-", "bearer", "akia", "asia"))
         ):
             raise ValueError("credential_ref must be a named non-secret reference")
-        if self.transport is Transport.BEDROCK_IAM and not self.region:
-            raise ValueError("bedrock-iam transport requires region")
+        if (
+            self.transport in {Transport.BEDROCK_IAM, Transport.BEDROCK_CONVERSE}
+            and not self.region
+        ):
+            raise ValueError("Bedrock transport requires region")
         if (
             self.transport
             in {

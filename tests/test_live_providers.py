@@ -298,6 +298,37 @@ def test_openai_content_repairs_gpt_oss_nested_opening_brace_before_json_parse()
     assert reviewer.review(package(), reviewer.rubric) == ()
 
 
+def test_bedrock_converse_uses_bearer_and_extracts_structured_output() -> None:
+    def opener(request: object, timeout: int) -> Response:
+        assert (
+            request.full_url
+            == "https://bedrock-runtime.us-west-2.amazonaws.com/model/anthropic.claude-sonnet-5/converse"
+        )  # type: ignore[attr-defined]
+        assert request.get_header("Authorization") == "Bearer secret"  # type: ignore[attr-defined]
+        body = json.loads(request.data)  # type: ignore[attr-defined]
+        assert body["messages"][0]["content"][0]["text"]
+        return Response(
+            b'{"output":{"message":{"content":['
+            b'{"reasoningContent":{"reasoningText":{"text":"internal"}}},'
+            b'{"text":"```json\\n{\\"findings\\":[]}\\n```"}]}}}'
+        )
+
+    reviewer = ProviderReviewer(
+        ProviderBinding(
+            provider="bedrock",
+            transport=Transport.BEDROCK_CONVERSE,
+            model="anthropic.claude-sonnet-5",
+            credential_source="keychain",
+            credential_ref="bedrock:us-west-2",
+            region="us-west-2",
+        ),
+        "secret",
+        RoleRubric("correctness", "review"),
+        opener=opener,
+    )
+    assert reviewer.review(package(), reviewer.rubric) == ()
+
+
 def test_bedrock_openai_compatible_uses_bearer_chat_completions() -> None:
     response = b'{"choices":[{"message":{"content":"{\\"findings\\":[]}"}}]}'
 
@@ -404,7 +435,36 @@ def test_provider_challenge_sends_only_bounded_dispute_and_strictly_parses_respo
     assert "reviewer_id" not in prompt
 
 
-def test_challenge_response_rejects_extra_or_malformed_fields() -> None:
+def test_bedrock_converse_challenge_uses_bounded_dispute_and_fenced_json() -> None:
+    seen: dict[str, object] = {}
+
+    def opener(request: object, timeout: int) -> Response:
+        seen["payload"] = json.loads(request.data)  # type: ignore[attr-defined]
+        return Response(
+            b'{"output":{"message":{"content":[{"text":"```json\\n{\\"disposition\\":\\"confirm\\",\\"evidence\\":[{\\"path\\":\\"src/a.py\\",\\"start_line\\":1,\\"end_line\\":1,\\"excerpt\\":\\"bad\\"}]}\\n```"}]}}}'
+        )
+
+    reviewer = ProviderReviewer(
+        ProviderBinding(
+            provider="bedrock",
+            transport=Transport.BEDROCK_CONVERSE,
+            model="us.anthropic.claude-sonnet-5",
+            credential_source="keychain",
+            credential_ref="bedrock:us-west-2",
+            region="us-west-2",
+        ),
+        "secret",
+        RoleRubric("correctness", "review"),
+        opener,
+    )
+    dispute = Dispute(
+        group_id="group",
+        question="Is this evidence sufficient?",
+        citations=({"path": "src/a.py", "start_line": 1, "end_line": 1, "excerpt": "bad"},),
+    )
+    assert reviewer.review_challenge(dispute)["disposition"] == "confirm"
+    assert "src/a.py" in seen["payload"]["messages"][0]["content"][0]["text"]  # type: ignore[index]
+
     reviewer = ProviderReviewer(
         binding(Transport.OPENAI_COMPATIBLE), "secret", RoleRubric("correctness", "review")
     )

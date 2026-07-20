@@ -7,7 +7,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Protocol
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from pydantic import ValidationError
@@ -156,6 +156,16 @@ class ProviderReviewer:
                 timeout_seconds=self.timeout_seconds,
             )
             content = self._gemini_content(response)
+        elif self.binding.transport is Transport.BEDROCK_CONVERSE:
+            response = http_post_json(
+                self._bedrock_converse_endpoint(),
+                self._bearer_headers(),
+                self._bedrock_converse_payload(package, rubric),
+                opener=self.opener,
+                allow_local_http=self.binding.allow_local_http,
+                timeout_seconds=self.timeout_seconds,
+            )
+            content = self._bedrock_converse_content(response)
         elif self.binding.transport in {
             Transport.OPENAI_COMPATIBLE,
             Transport.XAI,
@@ -175,7 +185,7 @@ class ProviderReviewer:
         else:
             raise PolicyRejectionError("unsupported native/OAuth transport")
         try:
-            parsed = json.loads(content)
+            parsed = json.loads(self._structured_content(content))
             findings = parsed["findings"]
             if set(parsed) != {"findings"} or not isinstance(findings, list):
                 raise ValueError("unexpected response shape")
@@ -215,6 +225,16 @@ class ProviderReviewer:
                 timeout_seconds=self.timeout_seconds,
             )
             content = self._gemini_content(response)
+        elif self.binding.transport is Transport.BEDROCK_CONVERSE:
+            response = http_post_json(
+                self._bedrock_converse_endpoint(),
+                self._bearer_headers(),
+                self._bedrock_converse_challenge_payload(dispute),
+                opener=self.opener,
+                allow_local_http=self.binding.allow_local_http,
+                timeout_seconds=self.timeout_seconds,
+            )
+            content = self._bedrock_converse_content(response)
         elif self.binding.transport in {
             Transport.OPENAI_COMPATIBLE,
             Transport.XAI,
@@ -239,13 +259,50 @@ class ProviderReviewer:
     def _parse_challenge_response(content: str, dispute: Dispute) -> dict[str, object]:
         try:
             return (
-                ChallengeResponse.model_validate(json.loads(content))
+                ChallengeResponse.model_validate(
+                    json.loads(ProviderReviewer._structured_content(content))
+                )
                 .validate_for(dispute)
                 .model_dump()
             )
         except (TypeError, json.JSONDecodeError, ValidationError, ValueError) as error:
             raise InvalidReviewerOutputError(
                 "provider returned malformed challenge JSON"
+            ) from error
+
+    def _bedrock_converse_endpoint(self) -> str:
+        if not self.binding.region:
+            raise PolicyRejectionError("Bedrock Converse requires region")
+        model = quote(self.binding.model, safe="")
+        return f"https://bedrock-runtime.{self.binding.region}.amazonaws.com/model/{model}/converse"
+
+    def _bedrock_converse_payload(
+        self, package: ReviewPackage, rubric: RoleRubric
+    ) -> dict[str, object]:
+        return {
+            "messages": [{"role": "user", "content": [{"text": self._prompt(package, rubric)}]}],
+            "inferenceConfig": {"maxTokens": 4096},
+            "additionalModelRequestFields": {"thinking": {"type": "disabled"}},
+        }
+
+    def _bedrock_converse_challenge_payload(self, dispute: Dispute) -> dict[str, object]:
+        return {
+            "messages": [{"role": "user", "content": [{"text": self._challenge_prompt(dispute)}]}],
+            "inferenceConfig": {"maxTokens": 2048},
+            "additionalModelRequestFields": {"thinking": {"type": "disabled"}},
+        }
+
+    @staticmethod
+    def _bedrock_converse_content(response: dict[str, object]) -> str:
+        try:
+            content = response["output"]["message"]["content"]  # type: ignore[index]
+            text = next(item["text"] for item in content if isinstance(item.get("text"), str))  # type: ignore[union-attr]
+            if not isinstance(text, str):
+                raise TypeError("Bedrock Converse content is not text")
+            return text
+        except (KeyError, IndexError, TypeError) as error:
+            raise InvalidReviewerOutputError(
+                "provider returned malformed Bedrock Converse response"
             ) from error
 
     def _gemini_endpoint(self) -> str:
@@ -282,9 +339,12 @@ class ProviderReviewer:
         output_contract = " ".join(
             (
                 'Output contract: return exactly {"findings":[]}, or a findings array.',
-                "Every item has severity, title, claim, evidence, remediation, verification, "
+                "Every item has severity (exactly blocker, concern, or suggestion; never "
+                "high, medium, or low), title, claim, evidence, remediation, verification, "
                 "confidence.",
-                "Each evidence item has path, start_line, end_line, excerpt.",
+                "Each evidence item has path, start_line, end_line, excerpt. Confidence is a "
+                "number from 0 to 1, not a word. Return raw JSON only: no Markdown fences or "
+                "commentary.",
                 "Report only material defects proven by PATCH_EVIDENCE; otherwise return "
                 "no findings.",
             )
@@ -370,6 +430,14 @@ class ProviderReviewer:
             raise InvalidReviewerOutputError(
                 "provider returned malformed Gemini response"
             ) from error
+
+    @staticmethod
+    def _structured_content(content: str) -> str:
+        """Accept only one enclosing JSON Markdown fence, then preserve strict JSON parsing."""
+        stripped = content.strip()
+        if stripped.startswith("```json\n") and stripped.endswith("\n```"):
+            return stripped[len("```json\n") : -len("\n```")]
+        return stripped
 
     @staticmethod
     def _openai_content(response: dict[str, object]) -> str:
