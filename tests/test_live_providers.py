@@ -10,22 +10,31 @@ import pytest
 
 from review_fabric.configuration import ProviderBinding, Transport
 from review_fabric.domain.adjudication import Dispute
-from review_fabric.domain.models import ReviewPackage
+from review_fabric.domain.models import FrozenPatchEvidence, ReviewPackage
 from review_fabric.errors import InvalidReviewerOutputError, PolicyRejectionError
 from review_fabric.reviewers.base import RoleRubric
 from review_fabric.reviewers.providers import ProviderReviewer, http_post_json
 
 
 def package() -> ReviewPackage:
+    patch = (
+        "diff --git a/src/a.py b/src/a.py\n"
+        "--- a/src/a.py\n"
+        "+++ b/src/a.py\n"
+        "@@ -0,0 +1 @@\n"
+        "+bad = True\n"
+    )
+    evidence = FrozenPatchEvidence.from_patch(patch)
     return ReviewPackage(
         repository_root="/repo",
         base_sha="a" * 40,
         head_sha="b" * 40,
-        patch_digest="c" * 64,
+        patch_digest=evidence.digest,
         selected_paths=("src/a.py",),
         acceptance_criteria=(),
         constraints=("read-only",),
         command_results=(),
+        patch_evidence=evidence,
     )
 
 
@@ -94,9 +103,77 @@ def test_gemini_request_is_bounded_and_parses_strict_findings() -> None:
     )
     findings = reviewer.review(package(), reviewer.rubric)
     assert seen["url"].endswith("/v1beta/models/light-model:generateContent")
-    assert seen["timeout"] == 10
+    assert seen["timeout"] == 60
     assert b"response_mime_type" in seen["data"]
     assert findings[0].package_id == package().review_id
+
+
+def test_provider_request_timeout_is_explicit_and_bounded() -> None:
+    seen: dict[str, int] = {}
+
+    def opener(_request: object, timeout: int) -> Response:
+        seen["timeout"] = timeout
+        return Response(b'{"choices":[{"message":{"content":"{\\"findings\\":[]}"}}]}')
+
+    reviewer = ProviderReviewer(
+        binding(Transport.OPENAI_COMPATIBLE),
+        "secret",
+        RoleRubric("correctness", "review"),
+        opener=opener,
+        timeout_seconds=7,
+    )
+
+    assert reviewer.review(package(), reviewer.rubric) == ()
+    assert seen["timeout"] == 7
+
+
+def test_provider_prompt_uses_frozen_patch_and_rejects_fabricated_citations() -> None:
+    seen: dict[str, object] = {}
+
+    def opener(request: object, timeout: int) -> Response:
+        seen["payload"] = json.loads(request.data)  # type: ignore[attr-defined]
+        response = {
+            "choices": [
+                {
+                    "message": {
+                        "content": json.dumps(
+                            {
+                                "findings": [
+                                    {
+                                        "severity": "concern",
+                                        "title": "Bad",
+                                        "claim": "Bad",
+                                        "evidence": [
+                                            {
+                                                "path": "src/a.py",
+                                                "start_line": 1,
+                                                "end_line": 1,
+                                                "excerpt": "invented",
+                                            }
+                                        ],
+                                        "remediation": "Fix",
+                                        "verification": "test",
+                                        "confidence": 0.9,
+                                    }
+                                ]
+                            }
+                        )
+                    }
+                }
+            ]
+        }
+        return Response(json.dumps(response).encode())
+
+    reviewer = ProviderReviewer(
+        binding(Transport.OPENAI_COMPATIBLE), "secret", RoleRubric("correctness", "review"), opener
+    )
+    with pytest.raises(InvalidReviewerOutputError, match="citation"):
+        reviewer.review(package(), reviewer.rubric)
+
+    prompt = seen["payload"]["messages"][0]["content"]  # type: ignore[index]
+    assert "bad = True" in prompt
+    assert package().repository_root not in prompt
+    assert "read files" not in prompt.lower()
 
 
 def test_openai_compatible_request_and_malformed_or_network_output_escalate_redacted() -> None:
@@ -191,6 +268,36 @@ def test_response_cap_and_unsupported_transport_are_safe() -> None:
             package(), RoleRubric("correctness", "review")
         )
 
+
+
+
+def test_openai_reasoning_prefix_is_stripped_before_structured_parse() -> None:
+    response = (
+        b'{"choices":[{"message":{"content":"<reasoning>internal</reasoning>'
+        b'{\\"findings\\":[]}"}}]}'
+    )
+
+    reviewer = ProviderReviewer(
+        binding(Transport.OPENAI_COMPATIBLE),
+        "secret",
+        RoleRubric("correctness", "review"),
+        opener=lambda *_: Response(response),
+    )
+    assert reviewer.review(package(), reviewer.rubric) == ()
+
+
+def test_openai_content_repairs_gpt_oss_nested_opening_brace_before_json_parse() -> None:
+    response = (
+        b'{"choices":[{"message":{"content":"<reasoning>internal</reasoning>'
+        b'{\\"{\\"findings\\":[]}"}}]}'
+    )
+    reviewer = ProviderReviewer(
+        binding(Transport.OPENAI_COMPATIBLE),
+        "secret",
+        RoleRubric("correctness", "review"),
+        opener=lambda *_: Response(response),
+    )
+    assert reviewer.review(package(), reviewer.rubric) == ()
 
 
 def test_bedrock_openai_compatible_uses_bearer_chat_completions() -> None:

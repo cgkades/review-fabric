@@ -9,7 +9,7 @@ from pathlib import Path
 
 from review_fabric.configuration import ReviewConfiguration, Transport, load_configuration
 from review_fabric.credentials import auth_remove, auth_set, auth_status, resolve_credential
-from review_fabric.domain.models import ReviewPackage
+from review_fabric.domain.models import FrozenPatchEvidence, ReviewPackage
 from review_fabric.domain.policy import ReviewPolicy
 from review_fabric.errors import ReviewFabricError
 from review_fabric.evidence.artifacts import ArtifactStore
@@ -67,6 +67,7 @@ def run(
             *(() if configuration is None else (f"configuration:{configuration.identity}",)),
         ),
         command_results=(),
+        patch_evidence=FrozenPatchEvidence.from_patch(evidence.patch),
     )
     artifact_directory = ArtifactStore.directory_for(Path(evidence.repository_root), package)
     if artifact_directory.exists():
@@ -96,7 +97,9 @@ def run(
                     credential = resolve_credential(
                         binding, repository=repository, env_file=env_file
                     )
-                    reviewers[role.value] = ProviderReviewer(binding, credential, rubric)
+                    reviewers[role.value] = ProviderReviewer(
+                        binding, credential, rubric, timeout_seconds=plan.timeout_seconds
+                    )
     except (ReviewFabricError, OSError, ValueError):
         # Credential/configuration exception text may contain a path or provider
         # detail; artifacts persist a stable category only.

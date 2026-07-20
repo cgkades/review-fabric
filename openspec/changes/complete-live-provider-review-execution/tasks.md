@@ -10,7 +10,8 @@
 - [x] 2.2 Implement Gemini light-model transport and `ProviderReviewer` conversion into validated findings.
 - [x] 2.3 Write failing OpenAI-compatible transport tests and implement the generic/xAI path.
 - [x] 2.4 Add native-provider/Bedrock transports behind the same reviewer interface, or explicit unsupported escalation where no safe documented path is available.
-- [x] 2.5 Run provider, credential, and redaction tests.
+- [x] 2.6 Add bounded immutable patch evidence to the reviewer DTO/prompt, with explicit size limits, citation integrity tests, and no arbitrary repository reads.
+- [x] 2.7 Make the provider request timeout follow the bounded review plan and validate a live GPT-OSS smoke review.
 
 ## 3. Bounded conversation and adjudication
 

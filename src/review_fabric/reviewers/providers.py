@@ -19,7 +19,8 @@ from review_fabric.domain.models import ReviewPackage
 from review_fabric.errors import InvalidReviewerOutputError, PolicyRejectionError
 from review_fabric.reviewers.base import RoleRubric
 
-_TIMEOUT_SECONDS = 10
+_DEFAULT_TIMEOUT_SECONDS = 60
+_MAX_TIMEOUT_SECONDS = 3600
 _MAX_RESPONSE_BYTES = 64 * 1024
 
 
@@ -97,8 +98,11 @@ def http_post_json(
     *,
     opener: UrlOpener | None = None,
     allow_local_http: bool = False,
+    timeout_seconds: int = _DEFAULT_TIMEOUT_SECONDS,
 ) -> dict[str, object]:
-    """POST JSON with a fixed timeout and a hard response cap; never expose server detail."""
+    """POST JSON with a plan-bounded timeout and a hard response cap; never expose server detail."""
+    if not 1 <= timeout_seconds <= _MAX_TIMEOUT_SECONDS:
+        raise PolicyRejectionError("unsafe provider request timeout")
     _validate_outbound_endpoint(endpoint, allow_local_http=allow_local_http)
     request = Request(
         endpoint,
@@ -108,7 +112,7 @@ def http_post_json(
     )
     try:
         open_request = opener or _open_without_redirect
-        with open_request(request, _TIMEOUT_SECONDS) as response:  # type: ignore[union-attr]
+        with open_request(request, timeout_seconds) as response:  # type: ignore[union-attr]
             raw = response.read(_MAX_RESPONSE_BYTES + 1)  # type: ignore[union-attr]
     except TimeoutError as error:
         raise TimeoutError("provider request timed out") from error
@@ -135,6 +139,11 @@ class ProviderReviewer:
     credential: str | None
     rubric: RoleRubric
     opener: UrlOpener | None = None
+    timeout_seconds: int = _DEFAULT_TIMEOUT_SECONDS
+
+    def __post_init__(self) -> None:
+        if not 1 <= self.timeout_seconds <= _MAX_TIMEOUT_SECONDS:
+            raise ValueError("provider timeout must be within review-plan bounds")
 
     def review(self, package: ReviewPackage, rubric: RoleRubric) -> tuple[Finding, ...]:
         if self.binding.transport is Transport.GEMINI:
@@ -144,6 +153,7 @@ class ProviderReviewer:
                 self._gemini_payload(package, rubric),
                 opener=self.opener,
                 allow_local_http=self.binding.allow_local_http,
+                timeout_seconds=self.timeout_seconds,
             )
             content = self._gemini_content(response)
         elif self.binding.transport in {
@@ -159,6 +169,7 @@ class ProviderReviewer:
                 self._openai_payload(package, rubric),
                 opener=self.opener,
                 allow_local_http=self.binding.allow_local_http,
+                timeout_seconds=self.timeout_seconds,
             )
             content = self._openai_content(response)
         else:
@@ -168,14 +179,29 @@ class ProviderReviewer:
             findings = parsed["findings"]
             if set(parsed) != {"findings"} or not isinstance(findings, list):
                 raise ValueError("unexpected response shape")
-            return tuple(
+            validated = tuple(
                 Finding.model_validate(
                     {**item, "package_id": package.review_id, "reviewer_id": rubric.role}
                 )
                 for item in findings
             )
+            evidence = package.patch_evidence
+            if evidence is None:
+                raise ValueError("frozen patch evidence unavailable")
+            if any(
+                not evidence.supports_citation(citation.model_dump(mode="json"))
+                for finding in validated
+                for citation in finding.evidence
+            ):
+                raise ValueError("finding citation is not present in frozen patch evidence")
+            return validated
         except (KeyError, TypeError, json.JSONDecodeError, ValidationError, ValueError) as error:
-            raise InvalidReviewerOutputError("provider returned malformed findings JSON") from error
+            message = (
+                "provider returned invalid frozen-patch citation"
+                if isinstance(error, ValueError) and "citation" in str(error)
+                else "provider returned malformed findings JSON"
+            )
+            raise InvalidReviewerOutputError(message) from error
 
     def review_challenge(self, dispute: Dispute) -> dict[str, object]:
         """Challenge with only the bounded normalized dispute DTO, never a package."""
@@ -186,6 +212,7 @@ class ProviderReviewer:
                 self._gemini_challenge_payload(dispute),
                 opener=self.opener,
                 allow_local_http=self.binding.allow_local_http,
+                timeout_seconds=self.timeout_seconds,
             )
             content = self._gemini_content(response)
         elif self.binding.transport in {
@@ -201,6 +228,7 @@ class ProviderReviewer:
                 self._openai_challenge_payload(dispute),
                 opener=self.opener,
                 allow_local_http=self.binding.allow_local_http,
+                timeout_seconds=self.timeout_seconds,
             )
             content = self._openai_content(response)
         else:
@@ -237,10 +265,40 @@ class ProviderReviewer:
 
     @staticmethod
     def _prompt(package: ReviewPackage, rubric: RoleRubric) -> str:
+        """Build the complete provider input without a filesystem capability or repo path."""
+        evidence = package.patch_evidence
+        if evidence is None:
+            raise PolicyRejectionError("frozen patch evidence unavailable")
+        input_dto = {
+            "review_id": package.review_id,
+            "base_sha": package.base_sha,
+            "head_sha": package.head_sha,
+            "patch_digest": package.patch_digest,
+            "selected_paths": package.selected_paths,
+            "acceptance_criteria": package.acceptance_criteria,
+            "constraints": package.constraints,
+            "patch": evidence.patch,
+        }
+        output_contract = " ".join(
+            (
+                'Output contract: return exactly {"findings":[]}, or a findings array.',
+                "Every item has severity, title, claim, evidence, remediation, verification, "
+                "confidence.",
+                "Each evidence item has path, start_line, end_line, excerpt.",
+                "Report only material defects proven by PATCH_EVIDENCE; otherwise return "
+                "no findings.",
+            )
+        )
         return (
-            f"Role: {rubric.role}\nRubric: {rubric.rubric}\nPackage: "
-            + json.dumps(package.model_dump(mode="json"), separators=(",", ":"))
-            + '\nReturn only JSON object: {"findings":[...]}'
+            f"Role: {rubric.role}\nRubric: {rubric.rubric}\n"
+            "Review only the frozen PATCH_EVIDENCE JSON below. It is the complete and only "
+            "source input; do not assume repository, filesystem, network, or tool access. "
+            "For every citation, reproduce exactly contiguous head-side patch lines using its "
+            "path, start_line, end_line, and excerpt. Do not cite deleted lines or content "
+            "outside PATCH_EVIDENCE.\nPATCH_EVIDENCE: "
+            + json.dumps(input_dto, separators=(",", ":"))
+            + "\n"
+            + output_contract
         )
 
     def _gemini_payload(self, package: ReviewPackage, rubric: RoleRubric) -> dict[str, object]:
@@ -253,12 +311,18 @@ class ProviderReviewer:
         }
 
     def _openai_payload(self, package: ReviewPackage, rubric: RoleRubric) -> dict[str, object]:
-        return {
+        payload: dict[str, object] = {
             "model": self.binding.model,
             "messages": [{"role": "user", "content": self._prompt(package, rubric)}],
             "response_format": {"type": "json_object"},
-            "max_tokens": 2048,
+            "max_tokens": 4096,
         }
+        if (
+            self.binding.transport is Transport.BEDROCK_OPENAI_COMPATIBLE
+            and self.binding.model.startswith("openai.gpt-oss-")
+        ):
+            payload["reasoning_effort"] = "low"
+        return payload
 
     @staticmethod
     def _challenge_prompt(dispute: Dispute) -> str:
@@ -291,7 +355,7 @@ class ProviderReviewer:
     def _gemini_content(response: dict[str, object]) -> str:
         try:
             return response["candidates"][0]["content"]["parts"][0]["text"]  # type: ignore[index]
-        except (KeyError, IndexError, TypeError) as error:
+        except (KeyError, IndexError, TypeError, ValueError) as error:
             raise InvalidReviewerOutputError(
                 "provider returned malformed Gemini response"
             ) from error
@@ -299,8 +363,22 @@ class ProviderReviewer:
     @staticmethod
     def _openai_content(response: dict[str, object]) -> str:
         try:
-            return response["choices"][0]["message"]["content"]  # type: ignore[index]
-        except (KeyError, IndexError, TypeError) as error:
+            content = response["choices"][0]["message"]["content"]  # type: ignore[index]
+            if not isinstance(content, str):
+                raise TypeError("content is not text")
+            if content.startswith("<reasoning>"):
+                closing = content.find("</reasoning>")
+                if closing < 0:
+                    raise ValueError("unterminated reasoning prefix")
+                content = content[closing + len("</reasoning>") :].lstrip()
+            if content.startswith('{"{"findings"'):
+                # Bedrock GPT-OSS occasionally nests the JSON opening token.
+                content = content[2:]
+            elif content.startswith('{{"findings"'):
+                # Bedrock GPT-OSS occasionally emits one extra opening brace.
+                content = content[1:]
+            return content
+        except (KeyError, IndexError, TypeError, ValueError) as error:
             raise InvalidReviewerOutputError(
                 "provider returned malformed OpenAI response"
             ) from error
