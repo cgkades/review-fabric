@@ -11,6 +11,7 @@ from pathlib import Path
 from pydantic import BaseModel, ConfigDict
 
 from review_fabric.errors import InvalidReviewPackageError
+from review_fabric.redaction import redact
 
 
 class GitEvidence(BaseModel):
@@ -80,11 +81,6 @@ def _run_git(repository: Path, *arguments: str) -> str:
         ) from error
 
 
-_SAFE_TEST_SECRET_VALUES = re.compile(
-    r"(?i)\b(?:dotenv|environment|runtime|not-allowed|example|test|fake|dummy)[-_a-z0-9]*\b"
-)
-
-
 def _reject_secret_material(patch: str) -> None:
     added_lines = [
         line[1:]
@@ -92,8 +88,6 @@ def _reject_secret_material(patch: str) -> None:
         if line.startswith("+") and not line.startswith("+++")
     ]
     for line in added_lines:
-        if _SAFE_TEST_SECRET_VALUES.search(line):
-            continue
         if any(pattern.search(line) for pattern in _SECRET_PATTERNS):
             raise InvalidReviewPackageError("Git patch contains potential secret material")
 
@@ -138,6 +132,7 @@ def collect_git_evidence(repository: Path, base_revision: str, head_revision: st
         "--",
     )
     _reject_secret_material(patch)
+    patch = redact(patch)
     changed_paths = tuple(
         sorted(
             filter(

@@ -10,4 +10,6 @@ Validate a change before review:
 npx --yes @fission-ai/openspec@1.6.0 validate establish-review-protocol --strict
 ```
 
+GitHub Actions runs the locked test suite, Ruff, build, and installed-wheel CLI smoke check for every push and pull request.
+
 Do not add credentials, captured provider responses containing secrets, or product mutations outside a review's `.review-fabric/` artifact directory.

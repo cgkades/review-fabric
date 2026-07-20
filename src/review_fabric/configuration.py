@@ -12,6 +12,8 @@ from urllib.parse import urlparse
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
+from review_fabric.serialization import canonical_json_bytes
+
 
 class Transport(StrEnum):
     FAKE = "fake"
@@ -127,6 +129,21 @@ class ReviewConfiguration(BaseModel):
         unsupported = [role for role in roles if not self.binding_for(role).structured_output]
         if unsupported:
             raise ValueError(f"selected roles lack structured output: {', '.join(unsupported)}")
+        supported = {
+            Transport.FAKE,
+            Transport.GEMINI,
+            Transport.XAI,
+            Transport.OPENAI_COMPATIBLE,
+            Transport.BEDROCK_OPENAI_COMPATIBLE,
+            Transport.BEDROCK_CONVERSE,
+        }
+        unavailable = [
+            role for role in roles if self.binding_for(role).transport not in supported
+        ]
+        if unavailable:
+            raise ValueError(
+                f"selected roles use unsupported transports: {', '.join(sorted(unavailable))}"
+            )
 
     def manifest_bindings(self) -> dict[str, dict[str, str]]:
         return {
@@ -143,11 +160,16 @@ class ReviewConfiguration(BaseModel):
     @property
     def identity(self) -> str:
         """Return a stable secret-free configuration identity for artifact separation."""
-        return sha256(self.model_dump_json().encode()).hexdigest()
+        return sha256(canonical_json_bytes(self.model_dump(mode="json"))).hexdigest()
 
 
-def load_configuration(path: Path) -> ReviewConfiguration:
+def load_configuration(path: Path, *, repository: Path | None = None) -> ReviewConfiguration:
     """Load JSON configuration containing references, never credential values."""
+    if repository:
+        resolved = path.resolve()
+        root = repository.resolve()
+        if resolved == root or root in resolved.parents:
+            raise ValueError("provider configuration must be outside the reviewed repository")
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:

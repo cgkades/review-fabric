@@ -1,10 +1,7 @@
 from __future__ import annotations
 
-import pytest
-
-from review_fabric.domain.findings import Finding, Severity
-from review_fabric.domain.models import ReviewPackage
-from review_fabric.errors import InvalidReviewerOutputError
+from review_fabric.domain.findings import EvidenceCitation, Finding, Severity
+from review_fabric.domain.models import FrozenPatchEvidence, ReviewPackage
 from review_fabric.orchestration import run_first_pass
 from review_fabric.reviewers.base import FakeReviewer, RoleRubric
 
@@ -28,6 +25,7 @@ def test_first_pass_isolates_reviewers_and_returns_valid_findings() -> None:
         findings=(
             Finding(
                 package_id=package().review_id,
+                reviewer_id="correctness",
                 severity=Severity.SUGGESTION,
                 title="Add a test",
                 claim="A branch is untested.",
@@ -51,7 +49,7 @@ def test_first_pass_isolates_reviewers_and_returns_valid_findings() -> None:
     assert second.received_packages == [package()]
 
 
-def test_first_pass_rejects_finding_from_another_package() -> None:
+def test_first_pass_records_finding_from_another_package_as_invalid_output() -> None:
     reviewer = FakeReviewer(
         RoleRubric(role="correctness", rubric="check correctness"),
         findings=(
@@ -68,5 +66,91 @@ def test_first_pass_rejects_finding_from_another_package() -> None:
         ),
     )
 
-    with pytest.raises(InvalidReviewerOutputError, match="package"):
-        run_first_pass(package(), (reviewer,))
+    result = run_first_pass(package(), (reviewer,))
+
+    assert result.findings == ()
+    assert result.failures[0]["kind"] == "invalid-output"
+
+
+def test_first_pass_rejects_finding_from_another_reviewer() -> None:
+    reviewer = FakeReviewer(
+        RoleRubric(role="correctness", rubric="check correctness"),
+        findings=(
+            Finding(
+                package_id=package().review_id,
+                reviewer_id="security",
+                severity=Severity.SUGGESTION,
+                title="Forged reviewer",
+                claim="The role is fabricated.",
+                evidence=(),
+                remediation="Reject it.",
+                verification="Run pytest.",
+                confidence=0.5,
+            ),
+        ),
+    )
+
+    result = run_first_pass(package(), (reviewer,))
+
+    assert result.findings == ()
+    assert result.failures[0]["kind"] == "invalid-output"
+
+
+def test_first_pass_rejects_citation_not_in_frozen_patch() -> None:
+    patch = "diff --git a/a.py b/a.py\n+++ b/a.py\n@@ -0,0 +1 @@\n+safe = True\n"
+    evidence = FrozenPatchEvidence.from_patch(patch)
+    review_package = package().model_copy(
+        update={"patch_digest": evidence.digest, "patch_evidence": evidence}
+    )
+    reviewer = FakeReviewer(
+        RoleRubric(role="correctness", rubric="check correctness"),
+        findings=(
+            Finding(
+                package_id=review_package.review_id,
+                reviewer_id="correctness",
+                severity=Severity.CONCERN,
+                title="Invented evidence",
+                claim="This citation was not supplied.",
+                evidence=(
+                    EvidenceCitation(path="a.py", start_line=1, end_line=1, excerpt="invented"),
+                ),
+                remediation="Reject it.",
+                verification="Run pytest.",
+                confidence=0.9,
+            ),
+        ),
+    )
+
+    result = run_first_pass(review_package, (reviewer,))
+
+    assert result.findings == ()
+    assert result.failures[0]["kind"] == "invalid-output"
+
+
+def test_first_pass_does_not_retry_invalid_reviewer_output() -> None:
+    class InvalidThenValidReviewer(FakeReviewer):
+        calls: int = 0
+
+        def review(self, review_package: ReviewPackage, rubric: RoleRubric) -> tuple[Finding, ...]:
+            self.calls += 1
+            return (
+                Finding(
+                    package_id=review_package.review_id,
+                    reviewer_id="forged",
+                    severity=Severity.SUGGESTION,
+                    title="Forged reviewer",
+                    claim="The role is fabricated.",
+                    evidence=(),
+                    remediation="Reject it.",
+                    verification="Run pytest.",
+                    confidence=0.5,
+                ),
+            )
+
+    reviewer = InvalidThenValidReviewer(RoleRubric(role="correctness", rubric="check correctness"))
+
+    result = run_first_pass(package(), (reviewer,), retry_limit=1)
+
+    assert reviewer.calls == 1
+    assert result.findings == ()
+    assert result.failures[0]["kind"] == "invalid-output"

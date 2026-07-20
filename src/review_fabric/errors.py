@@ -16,6 +16,10 @@ class InvalidReviewPackageError(ReviewFabricError):
     """Raised when review inputs cannot form a valid immutable package."""
 
 
+class ArtifactAlreadyExistsError(InvalidReviewPackageError):
+    """Raised when another process has already created a review artifact."""
+
+
 class InvalidReviewerOutputError(ReviewFabricError):
     """Raised when a reviewer response violates the protocol schema."""
 

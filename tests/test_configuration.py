@@ -80,3 +80,75 @@ def test_generic_provider_requires_secure_endpoint() -> None:
             credential_ref="OPENAI_API_KEY",
             endpoint="http://api.example.test",
         )
+
+
+def test_configuration_identity_ignores_equivalent_mapping_order() -> None:
+    first = ReviewConfiguration.model_validate(
+        {
+            "version": 1,
+            "bindings": {
+                "one": {
+                    "provider": "one",
+                    "transport": "fake",
+                    "model": "one",
+                    "credential_source": "none",
+                },
+                "two": {
+                    "provider": "two",
+                    "transport": "fake",
+                    "model": "two",
+                    "credential_source": "none",
+                },
+            },
+            "roles": {"correctness": "one", "testing": "two"},
+        }
+    )
+    second = ReviewConfiguration.model_validate(
+        {
+            "version": 1,
+            "bindings": {
+                "two": {
+                    "provider": "two",
+                    "transport": "fake",
+                    "model": "two",
+                    "credential_source": "none",
+                },
+                "one": {
+                    "provider": "one",
+                    "transport": "fake",
+                    "model": "one",
+                    "credential_source": "none",
+                },
+            },
+            "roles": {"testing": "two", "correctness": "one"},
+        }
+    )
+
+    assert first.identity == second.identity
+
+
+@pytest.mark.parametrize(
+    "transport",
+    [Transport.OPENAI, Transport.ANTHROPIC, Transport.AZURE_AI_FOUNDRY, Transport.BEDROCK_IAM],
+)
+def test_configuration_rejects_selected_unsupported_transport(transport: Transport) -> None:
+    binding = ProviderBinding(
+        provider="provider",
+        transport=transport,
+        model="model",
+        credential_source="aws-chain" if transport is Transport.BEDROCK_IAM else "environment",
+        credential_ref=None if transport is Transport.BEDROCK_IAM else "API_KEY",
+        endpoint=(
+            "https://provider.example.test"
+            if transport is Transport.AZURE_AI_FOUNDRY
+            else None
+        ),
+        deployment="deployment" if transport is Transport.AZURE_AI_FOUNDRY else None,
+        region="us-west-2" if transport is Transport.BEDROCK_IAM else None,
+    )
+    configuration = ReviewConfiguration(
+        version=1, bindings={"provider": binding}, roles={"correctness": "provider"}
+    )
+
+    with pytest.raises(ValueError, match="unsupported"):
+        configuration.validate_selected_roles(("correctness",))

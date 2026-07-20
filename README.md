@@ -1,6 +1,6 @@
 # Review Fabric
 
-Review Fabric is an evidence-driven, local code-review protocol. It captures an immutable Git comparison, selects provider-neutral logical reviewer roles by risk, and stores replayable records under the reviewed repository's `.review-fabric/` directory.
+Review Fabric is an evidence-driven, local code-review protocol. It captures an immutable Git comparison, selects provider-neutral logical reviewer roles by risk, and stores replayable records under the reviewed repository's private `.review-fabric/` directory.
 
 ## Safety and scope
 
@@ -24,7 +24,7 @@ MVP non-goals: browser-token scraping, credential persistence in project files, 
 
 ## Explicit live-provider configuration
 
-Live execution is opt-in: supply a secret-free JSON binding file with `--config`; see
+Live execution is opt-in: supply a secret-free JSON binding file outside the reviewed repository with `--config`; see
 `examples/light-model.review-fabric.json`. The Gemini Developer API and OpenAI-compatible
 (including xAI-compatible) transports use a stdlib HTTP client with a 60-second timeout and
 64 KiB response cap. Bedrock OpenAI-compatible transports support GPT-OSS; native Bedrock

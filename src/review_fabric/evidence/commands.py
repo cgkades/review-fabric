@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -30,7 +31,25 @@ def capture_command(repository: Path, command: tuple[str, ...]) -> CommandResult
 
     executable_command = command
     if command[0] in {"pytest", "ruff", "mypy"}:
-        executable_command = (sys.executable, "-m", *command)
+        # Isolated mode prevents a reviewed checkout from shadowing the tool module.
+        executable_command = (sys.executable, "-I", "-m", *command)
+    elif command[0] == "git":
+        executable_command = (
+            "git",
+            "-c",
+            "core.fsmonitor=false",
+            "-c",
+            f"core.hooksPath={os.devnull}",
+            *command[1:],
+        )
+    environment = {"PATH": os.defpath, "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1"}
+    environment.update(
+        {
+            "GIT_CONFIG_GLOBAL": os.devnull,
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_TERMINAL_PROMPT": "0",
+        }
+    )
     try:
         completed = subprocess.run(
             executable_command,
@@ -39,6 +58,7 @@ def capture_command(repository: Path, command: tuple[str, ...]) -> CommandResult
             check=False,
             encoding="utf-8",
             timeout=30,
+            env=environment,
         )
     except FileNotFoundError:
         return CommandResult(

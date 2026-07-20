@@ -26,15 +26,53 @@ class ChallengeReviewer(Protocol):
     def review_challenge(self, dispute: object) -> dict[str, object]: ...
 
 
-def run_first_pass(package: ReviewPackage, reviewers: tuple[Reviewer, ...]) -> FirstPassResult:
+def run_first_pass(
+    package: ReviewPackage, reviewers: tuple[Reviewer, ...], *, retry_limit: int = 0
+) -> FirstPassResult:
     """Invoke reviewers independently; peer outputs never enter these calls."""
     findings: list[Finding] = []
+    failures: list[dict[str, str]] = []
     for reviewer in reviewers:
-        reviewer_findings = reviewer.review(package, reviewer.rubric)
-        if any(finding.package_id != package.review_id for finding in reviewer_findings):
-            raise InvalidReviewerOutputError("reviewer finding references a different package")
-        findings.extend(reviewer_findings)
-    return FirstPassResult(findings=tuple(findings))
+        for attempt in range(retry_limit + 1):
+            try:
+                reviewer_findings = reviewer.review(package, reviewer.rubric)
+                _validate_reviewer_findings(package, reviewer, reviewer_findings)
+            except Exception as error:  # Provider SDKs use provider-specific exception hierarchies.
+                if isinstance(error, (InvalidReviewerOutputError, ValueError)) or (
+                    attempt == retry_limit
+                ):
+                    failures.append(
+                        {
+                            "role": reviewer.rubric.role,
+                            "kind": _failure_kind(error),
+                            "attempts": str(attempt + 1),
+                        }
+                    )
+                    break
+                continue
+            findings.extend(reviewer_findings)
+            break
+    return FirstPassResult(findings=tuple(findings), failures=tuple(failures))
+
+
+def _validate_reviewer_findings(
+    package: ReviewPackage, reviewer: Reviewer, findings: tuple[Finding, ...]
+) -> None:
+    if any(finding.package_id != package.review_id for finding in findings):
+        raise InvalidReviewerOutputError("reviewer finding references a different package")
+    if any(finding.reviewer_id != reviewer.rubric.role for finding in findings):
+        raise InvalidReviewerOutputError("reviewer finding references a different reviewer")
+    evidence = package.patch_evidence
+    if any(finding.evidence for finding in findings) and evidence is None:
+        raise InvalidReviewerOutputError("reviewer finding requires frozen patch evidence")
+    if evidence and any(
+        not evidence.supports_citation(citation.model_dump(mode="json"))
+        for finding in findings
+        for citation in finding.evidence
+    ):
+        raise InvalidReviewerOutputError(
+            "reviewer finding citation is not present in frozen patch evidence"
+        )
 
 
 def _failure_kind(error: Exception) -> str:
@@ -72,21 +110,24 @@ def execute_plan(
         )
         return FirstPassResult((), ({"kind": "missing-reviewer"},))
 
-    try:
-        result = run_first_pass(package, tuple(reviewers[role.value] for role in plan.roles))
-    except Exception as error:  # Provider SDKs use provider-specific exception hierarchies.
-        kind = _failure_kind(error)
-        store.record_event("execution-error", {"kind": kind})
-        store.record_event("terminal", {"outcome": "ESCALATE", "reason": "review execution failed"})
-        return FirstPassResult((), ({"kind": kind},))
-
+    result = run_first_pass(
+        package,
+        tuple(reviewers[role.value] for role in plan.roles),
+        retry_limit=plan.retry_limit,
+    )
     store.record_event(
         "first-pass",
         {
-            "status": "completed",
+            "status": "completed" if not result.failures else "incomplete",
             "findings": [finding.model_dump(mode="json") for finding in result.findings],
+            "failures": list(result.failures),
         },
     )
+    if result.failures:
+        for failure in result.failures:
+            store.record_event("execution-error", failure)
+        store.record_event("terminal", {"outcome": "ESCALATE", "reason": "review execution failed"})
+        return result
     material = tuple(
         finding
         for finding in result.findings
@@ -133,7 +174,18 @@ def execute_plan(
         )
         return result
     escalated = False
-    for group in groups[:1]:
+    for index, group in enumerate(groups):
+        if index >= plan.challenge_limit:
+            store.record_event(
+                "adjudication",
+                {
+                    "outcome": "ESCALATE",
+                    "group_id": group.id,
+                    "unresolved_question": "challenge limit reached",
+                },
+            )
+            escalated = True
+            continue
         dispute = make_dispute(group, "Is the evidence sufficient to require remediation?")
         store.record_event("challenge", dispute.model_dump(mode="json"))
         reviewer = (
@@ -155,11 +207,6 @@ def execute_plan(
             if decision.outcome.value == "ESCALATE":
                 escalated = True
         store.record_event("adjudication", decision.model_dump(mode="json"))
-    if len(groups) > 1:
-        escalated = True
-        store.record_event(
-            "adjudication", {"outcome": "ESCALATE", "reason": "challenge limit reached"}
-        )
     store.record_event(
         "terminal",
         {

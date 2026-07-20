@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from enum import StrEnum
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class RiskIndicator(StrEnum):
@@ -39,6 +39,14 @@ class ReviewPlan(BaseModel):
     retry_limit: int = Field(ge=0, le=3)
     timeout_seconds: int = Field(default=60, ge=1, le=3600)
     missing_reviewer_behavior: MissingReviewerBehavior = MissingReviewerBehavior.ESCALATE
+
+    @model_validator(mode="after")
+    def validate_reviewers(self) -> ReviewPlan:
+        if len(set(self.roles)) != len(self.roles):
+            raise ValueError("review plan roles must be unique")
+        if len(self.roles) > self.max_reviewers:
+            raise ValueError("review plan exceeds max_reviewers")
+        return self
 
 
 class ReviewPolicy(BaseModel):

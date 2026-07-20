@@ -105,6 +105,9 @@ def test_gemini_request_is_bounded_and_parses_strict_findings() -> None:
     assert seen["url"].endswith("/v1beta/models/light-model:generateContent")
     assert seen["timeout"] == 60
     assert b"response_mime_type" in seen["data"]
+    payload = json.loads(seen["data"])
+    assert "untrusted data" in payload["systemInstruction"]["parts"][0]["text"].lower()
+    assert "bad = True" in payload["contents"][0]["parts"][0]["text"]
     assert findings[0].package_id == package().review_id
 
 
@@ -170,10 +173,11 @@ def test_provider_prompt_uses_frozen_patch_and_rejects_fabricated_citations() ->
     with pytest.raises(InvalidReviewerOutputError, match="citation"):
         reviewer.review(package(), reviewer.rubric)
 
-    prompt = seen["payload"]["messages"][0]["content"]  # type: ignore[index]
-    assert "bad = True" in prompt
-    assert package().repository_root not in prompt
-    assert "read files" not in prompt.lower()
+    system = seen["payload"]["messages"][0]["content"]  # type: ignore[index]
+    evidence = seen["payload"]["messages"][1]["content"]  # type: ignore[index]
+    assert "bad = True" in evidence
+    assert package().repository_root not in evidence
+    assert "untrusted data" in system.lower()
 
 
 def test_openai_compatible_request_and_malformed_or_network_output_escalate_redacted() -> None:
@@ -306,6 +310,8 @@ def test_bedrock_converse_uses_bearer_and_extracts_structured_output() -> None:
         )  # type: ignore[attr-defined]
         assert request.get_header("Authorization") == "Bearer secret"  # type: ignore[attr-defined]
         body = json.loads(request.data)  # type: ignore[attr-defined]
+        assert "untrusted data" in body["system"][0]["text"].lower()
+        assert "bad = True" in body["messages"][0]["content"][0]["text"]
         assert body["messages"][0]["content"][0]["text"]
         return Response(
             b'{"output":{"message":{"content":['
@@ -429,10 +435,11 @@ def test_provider_challenge_sends_only_bounded_dispute_and_strictly_parses_respo
         "disposition": "confirm",
         "evidence": ({"path": "src/a.py", "start_line": 1, "end_line": 1, "excerpt": "bad"},),
     }
-    prompt = seen["payload"]["messages"][0]["content"]  # type: ignore[index]
-    assert "src/a.py" in prompt
-    assert "Package:" not in prompt
-    assert "reviewer_id" not in prompt
+    system = seen["payload"]["messages"][0]["content"]  # type: ignore[index]
+    evidence = seen["payload"]["messages"][1]["content"]  # type: ignore[index]
+    assert "src/a.py" in evidence
+    assert "reviewer_id" not in evidence
+    assert "untrusted data" in system.lower()
 
 
 def test_bedrock_converse_challenge_uses_bounded_dispute_and_fenced_json() -> None:

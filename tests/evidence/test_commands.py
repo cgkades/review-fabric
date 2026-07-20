@@ -17,6 +17,19 @@ def test_capture_command_records_an_allowlisted_read_only_command(tmp_path: Path
     assert result.stderr == ""
 
 
+def test_capture_command_does_not_import_modules_from_reviewed_repository(tmp_path: Path) -> None:
+    marker = tmp_path / "executed"
+    (tmp_path / "pytest.py").write_text(
+        f"from pathlib import Path\nPath({str(marker)!r}).write_text('executed')\n",
+        encoding="utf-8",
+    )
+
+    result = capture_command(tmp_path, ("pytest", "--version"))
+
+    assert result.exit_code == 0
+    assert not marker.exists()
+
+
 @pytest.mark.parametrize(
     "command",
     [

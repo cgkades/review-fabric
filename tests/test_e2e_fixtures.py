@@ -6,23 +6,31 @@ import json
 from pathlib import Path
 
 from review_fabric.domain.findings import EvidenceCitation, Finding, Severity
-from review_fabric.domain.models import ReviewPackage
-from review_fabric.domain.policy import ReviewPolicy
+from review_fabric.domain.models import FrozenPatchEvidence, ReviewPackage
+from review_fabric.domain.policy import ReviewerRole, ReviewPlan, ReviewPolicy
 from review_fabric.evidence.artifacts import ArtifactStore
 from review_fabric.orchestration import execute_plan
 from review_fabric.reviewers.base import FakeReviewer, RoleRubric
 
 
 def package() -> ReviewPackage:
+    patch = (
+        "diff --git a/src/example.py b/src/example.py\n"
+        "+++ b/src/example.py\n"
+        "@@ -3,0 +4 @@\n"
+        "+write()\n"
+    )
+    evidence = FrozenPatchEvidence.from_patch(patch)
     return ReviewPackage(
         repository_root="/tmp/curated-fixture",
         base_sha="a" * 40,
         head_sha="b" * 40,
-        patch_digest="c" * 64,
+        patch_digest=evidence.digest,
         selected_paths=("src/example.py",),
         acceptance_criteria=("review fixture",),
         constraints=("read-only",),
         command_results=(),
+        patch_evidence=evidence,
     )
 
 
@@ -34,7 +42,7 @@ def finding(package_id: str, reviewer: str, title: str = "Defect") -> Finding:
         title=title,
         claim="reachable write can duplicate after retry",
         evidence=(
-            EvidenceCitation(path="src/example.py", start_line=4, end_line=5, excerpt="write()"),
+            EvidenceCitation(path="src/example.py", start_line=4, end_line=4, excerpt="write()"),
         ),
         remediation="make the write idempotent",
         verification="add a timeout-after-commit regression test",
@@ -96,16 +104,23 @@ def test_duplicate_fixture_groups_both_observations(tmp_path: Path) -> None:
     store = ArtifactStore.create(tmp_path, review_package, patch="diff --git a/example b/example\n")
     reviewer = FakeReviewer(
         RoleRubric("correctness", "correctness"),
-        findings=(
-            finding(review_package.review_id, "correctness"),
-            finding(review_package.review_id, "testing"),
-        ),
+        findings=(finding(review_package.review_id, "correctness"),),
+    )
+    testing_reviewer = FakeReviewer(
+        RoleRubric("testing", "testing"),
+        findings=(finding(review_package.review_id, "testing"),),
     )
 
     execute_plan(
         review_package,
-        ReviewPolicy.default().select_plan(review_package.selected_paths),
-        {"correctness": reviewer},
+        ReviewPlan(
+            risk_indicators=(),
+            roles=(ReviewerRole.CORRECTNESS, ReviewerRole.TESTING),
+            max_reviewers=2,
+            challenge_limit=0,
+            retry_limit=0,
+        ),
+        {"correctness": reviewer, "testing": testing_reviewer},
         store,
     )
 

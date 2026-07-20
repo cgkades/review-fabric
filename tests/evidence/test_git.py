@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import subprocess
 from hashlib import sha256
 from pathlib import Path
@@ -12,12 +13,27 @@ from review_fabric.serialization import canonical_json_bytes
 
 
 def git(repository: Path, *args: str) -> str:
+    hooks = repository / ".test-hooks"
+    hooks.mkdir(exist_ok=True)
     completed = subprocess.run(
-        ("git", *args),
+        (
+            "git",
+            "-c",
+            "commit.gpgSign=false",
+            "-c",
+            f"core.hooksPath={hooks}",
+            *args,
+        ),
         cwd=repository,
         check=True,
         capture_output=True,
         text=True,
+        env={
+            "PATH": os.defpath,
+            "GIT_CONFIG_GLOBAL": os.devnull,
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_TERMINAL_PROMPT": "0",
+        },
     )
     return completed.stdout
 
@@ -101,6 +117,16 @@ def test_collect_git_evidence_rejects_committed_secret_material(repository: Path
     assert "sk-proj" not in str(error.value)
 
 
+def test_collect_git_evidence_rejects_secret_material_in_test_named_value(repository: Path) -> None:
+    secret_file = repository / "test_config.py"
+    secret_file.write_text("TEST_API_KEY=sk-proj-abcdefghijklmnopqrstuvwxyz1234567890\n")
+    git(repository, "add", "test_config.py")
+    git(repository, "commit", "-m", "add accidental test credential")
+
+    with pytest.raises(InvalidReviewPackageError, match="secret material"):
+        collect_git_evidence(repository, "HEAD~1", "HEAD")
+
+
 def test_collect_git_evidence_allows_removing_a_preexisting_secret(repository: Path) -> None:
     secret_file = repository / "config.env"
     secret_file.write_text("OPENAI_API_KEY=" + "sk-" + "proj-" + "x" * 30 + "\n")
@@ -112,3 +138,5 @@ def test_collect_git_evidence_allows_removing_a_preexisting_secret(repository: P
     evidence = collect_git_evidence(repository, "HEAD~1", "HEAD")
 
     assert "config.env" in evidence.changed_paths
+    assert "sk-proj-" not in evidence.patch
+    assert "[REDACTED]" in evidence.patch
