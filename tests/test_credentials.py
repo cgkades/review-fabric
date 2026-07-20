@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from review_fabric import credentials
 from review_fabric.configuration import ProviderBinding, Transport
 from review_fabric.credentials import load_dotenv, resolve_credential
 from review_fabric.errors import PolicyRejectionError
@@ -48,6 +49,26 @@ def test_dotenv_rejects_unsafe_or_tracked_files(tmp_path: Path) -> None:
     subprocess.run(("git", "add", ".env"), cwd=tmp_path, check=True)
     with pytest.raises(PolicyRejectionError, match="tracked"):
         load_dotenv(dotenv, tmp_path)
+
+
+
+def test_keychain_profile_resolves_without_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    class Keyring:
+        @staticmethod
+        def get_password(service: str, username: str) -> str | None:
+            assert (service, username) == ("review-fabric", "bedrock:us-west-2")
+            return "runtime-only"
+
+    monkeypatch.setattr(credentials, "_keyring", lambda: Keyring())
+    keychain_binding = ProviderBinding(
+        provider="bedrock",
+        transport=Transport.BEDROCK_OPENAI_COMPATIBLE,
+        model="openai.gpt-oss-20b-1:0",
+        credential_source="keychain",
+        credential_ref="bedrock:us-west-2",
+        endpoint="https://bedrock-runtime.us-west-2.amazonaws.com/openai/v1",
+    )
+    assert resolve_credential(keychain_binding, environment={}) == "runtime-only"
 
 
 def test_missing_named_credential_never_returns_a_value(tmp_path: Path) -> None:

@@ -192,6 +192,31 @@ def test_response_cap_and_unsupported_transport_are_safe() -> None:
         )
 
 
+
+def test_bedrock_openai_compatible_uses_bearer_chat_completions() -> None:
+    response = b'{"choices":[{"message":{"content":"{\\"findings\\":[]}"}}]}'
+
+    def opener(request: object, timeout: int) -> Response:
+        assert request.full_url == "https://bedrock-runtime.us-west-2.amazonaws.com/openai/v1/chat/completions"  # type: ignore[attr-defined]
+        assert request.get_header("Authorization") == "Bearer secret"  # type: ignore[attr-defined]
+        return Response(response)
+
+    reviewer = ProviderReviewer(
+        ProviderBinding(
+            provider="bedrock",
+            transport=Transport.BEDROCK_OPENAI_COMPATIBLE,
+            model="openai.gpt-oss-20b-1:0",
+            credential_source="environment",
+            credential_ref="BEDROCK_API_KEY",
+            endpoint="https://bedrock-runtime.us-west-2.amazonaws.com/openai/v1",
+        ),
+        "secret",
+        RoleRubric("correctness", "review"),
+        opener=opener,
+    )
+    assert reviewer.review(package(), reviewer.rubric) == ()
+
+
 def test_provider_challenge_sends_only_bounded_dispute_and_strictly_parses_response() -> None:
     seen: dict[str, object] = {}
 

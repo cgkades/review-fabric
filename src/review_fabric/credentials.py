@@ -50,6 +50,17 @@ def resolve_credential(
     """Resolve named environment/dotenv references, never persist returned values."""
     if binding.credential_source in {"none", "aws-chain", "workload"}:
         return None
+    reference = (binding.credential_ref or "").removeprefix("env:")
+    if binding.credential_source == "keychain":
+        try:
+            value = _keyring().get_password("review-fabric", reference)  # type: ignore[attr-defined]
+        except Exception as error:
+            raise keychain_unavailable() from error
+        if value:
+            return value
+        raise PolicyRejectionError(
+            f"credential unavailable; configure keychain profile {reference}"
+        )
     if binding.credential_source not in {"environment", "env", "dotenv"}:
         raise PolicyRejectionError(
             f"credential source {binding.credential_source} requires an external supported adapter"

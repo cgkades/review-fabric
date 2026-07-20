@@ -10,7 +10,7 @@ Low-risk changes use at most one reviewer and no challenge. Authorization, destr
 
 ## Providers and credentials
 
-Policy chooses roles only. Versioned configuration maps roles to bindings with provider, transport, model, and named credential source metadata. Credentials are resolved only at invocation time from workload identity, a named environment variable (which overrides dotenv), a private Git-ignored dotenv file, an OS keychain profile, or a supported external adapter. `.env` files must be private and untracked. Provider clients are injected/mocked by default; no adapter contacts a provider on its own. The optional CrewAI adapter is isolated from core/domain modules.
+Policy chooses roles only. Versioned configuration maps roles to bindings with provider, transport, model, and named credential source metadata. Credentials are resolved only at invocation time from workload identity, a named environment variable (which overrides dotenv), a private Git-ignored dotenv file, or an OS keychain profile. `.env` files must be private and untracked. Use `review-fabric auth set bedrock --profile us-west-2` to store an interactively entered token in the `review-fabric` keychain service, then configure `credential_source: "keychain"` and `credential_ref: "bedrock:us-west-2"`. Provider clients are activated only by an explicit `--config`; no provider contact occurs by default. The optional CrewAI adapter is isolated from core/domain modules.
 
 Run a local package capture with:
 

@@ -146,7 +146,11 @@ class ProviderReviewer:
                 allow_local_http=self.binding.allow_local_http,
             )
             content = self._gemini_content(response)
-        elif self.binding.transport in {Transport.OPENAI_COMPATIBLE, Transport.XAI}:
+        elif self.binding.transport in {
+            Transport.OPENAI_COMPATIBLE,
+            Transport.XAI,
+            Transport.BEDROCK_OPENAI_COMPATIBLE,
+        }:
             if not self.binding.endpoint:
                 raise PolicyRejectionError("openai-compatible transport requires endpoint")
             response = http_post_json(
@@ -184,7 +188,11 @@ class ProviderReviewer:
                 allow_local_http=self.binding.allow_local_http,
             )
             content = self._gemini_content(response)
-        elif self.binding.transport in {Transport.OPENAI_COMPATIBLE, Transport.XAI}:
+        elif self.binding.transport in {
+            Transport.OPENAI_COMPATIBLE,
+            Transport.XAI,
+            Transport.BEDROCK_OPENAI_COMPATIBLE,
+        }:
             if not self.binding.endpoint:
                 raise PolicyRejectionError("openai-compatible transport requires endpoint")
             response = http_post_json(
