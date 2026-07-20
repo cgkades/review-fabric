@@ -269,8 +269,6 @@ def test_response_cap_and_unsupported_transport_are_safe() -> None:
         )
 
 
-
-
 def test_openai_reasoning_prefix_is_stripped_before_structured_parse() -> None:
     response = (
         b'{"choices":[{"message":{"content":"<reasoning>internal</reasoning>'
@@ -304,7 +302,10 @@ def test_bedrock_openai_compatible_uses_bearer_chat_completions() -> None:
     response = b'{"choices":[{"message":{"content":"{\\"findings\\":[]}"}}]}'
 
     def opener(request: object, timeout: int) -> Response:
-        assert request.full_url == "https://bedrock-runtime.us-west-2.amazonaws.com/openai/v1/chat/completions"  # type: ignore[attr-defined]
+        assert (
+            request.full_url
+            == "https://bedrock-runtime.us-west-2.amazonaws.com/openai/v1/chat/completions"
+        )  # type: ignore[attr-defined]
         assert request.get_header("Authorization") == "Bearer secret"  # type: ignore[attr-defined]
         return Response(response)
 
@@ -322,6 +323,47 @@ def test_bedrock_openai_compatible_uses_bearer_chat_completions() -> None:
         opener=opener,
     )
     assert reviewer.review(package(), reviewer.rubric) == ()
+
+
+def test_bedrock_gpt_oss_does_not_request_incompatible_json_object_mode() -> None:
+    reviewer = ProviderReviewer(
+        ProviderBinding(
+            provider="bedrock",
+            transport=Transport.BEDROCK_OPENAI_COMPATIBLE,
+            model="openai.gpt-oss-20b-1:0",
+            credential_source="environment",
+            credential_ref="BEDROCK_API_KEY",
+            endpoint="https://bedrock-runtime.us-west-2.amazonaws.com/openai/v1",
+        ),
+        "secret",
+        RoleRubric("correctness", "review"),
+    )
+    payload = reviewer._openai_payload(package(), reviewer.rubric)
+    assert "response_format" not in payload
+    assert payload["reasoning_effort"] == "low"
+
+
+def test_bedrock_gpt_oss_challenge_uses_compatible_payload_mode() -> None:
+    reviewer = ProviderReviewer(
+        ProviderBinding(
+            provider="bedrock",
+            transport=Transport.BEDROCK_OPENAI_COMPATIBLE,
+            model="openai.gpt-oss-20b-1:0",
+            credential_source="environment",
+            credential_ref="BEDROCK_API_KEY",
+            endpoint="https://bedrock-runtime.us-west-2.amazonaws.com/openai/v1",
+        ),
+        "secret",
+        RoleRubric("correctness", "review"),
+    )
+    dispute = Dispute(
+        group_id="group",
+        question="Question",
+        citations=({"path": "src/a.py", "start_line": 1, "end_line": 1, "excerpt": "bad"},),
+    )
+    payload = reviewer._openai_challenge_payload(dispute)
+    assert "response_format" not in payload
+    assert payload["reasoning_effort"] == "low"
 
 
 def test_provider_challenge_sends_only_bounded_dispute_and_strictly_parses_response() -> None:

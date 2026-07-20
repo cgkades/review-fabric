@@ -314,9 +314,13 @@ class ProviderReviewer:
         payload: dict[str, object] = {
             "model": self.binding.model,
             "messages": [{"role": "user", "content": self._prompt(package, rubric)}],
-            "response_format": {"type": "json_object"},
             "max_tokens": 4096,
         }
+        if not (
+            self.binding.transport is Transport.BEDROCK_OPENAI_COMPATIBLE
+            and self.binding.model.startswith("openai.gpt-oss-")
+        ):
+            payload["response_format"] = {"type": "json_object"}
         if (
             self.binding.transport is Transport.BEDROCK_OPENAI_COMPATIBLE
             and self.binding.model.startswith("openai.gpt-oss-")
@@ -344,12 +348,19 @@ class ProviderReviewer:
         }
 
     def _openai_challenge_payload(self, dispute: Dispute) -> dict[str, object]:
-        return {
+        payload: dict[str, object] = {
             "model": self.binding.model,
             "messages": [{"role": "user", "content": self._challenge_prompt(dispute)}],
-            "response_format": {"type": "json_object"},
             "max_tokens": 512,
         }
+        if (
+            self.binding.transport is Transport.BEDROCK_OPENAI_COMPATIBLE
+            and self.binding.model.startswith("openai.gpt-oss-")
+        ):
+            payload["reasoning_effort"] = "low"
+        else:
+            payload["response_format"] = {"type": "json_object"}
+        return payload
 
     @staticmethod
     def _gemini_content(response: dict[str, object]) -> str:
