@@ -18,7 +18,31 @@ Run a local package capture with:
 review-fabric /path/to/repository BASE_SHA HEAD_SHA
 ```
 
-This creates an explicit escalation if no configured reviewers are supplied. Regenerate a report with `review-fabric summary .review-fabric/reviews/REVIEW_ID`.
+`--pr` is an explicit, optional alias confirming this bounded diff mode; it changes
+nothing. This creates an explicit escalation if no configured reviewers are supplied.
+Regenerate a report with `review-fabric summary .review-fabric/reviews/REVIEW_ID`.
+
+To review an entire tracked codebase instead of a bounded diff (e.g. no meaningful
+base commit exists, or you want every file assessed rather than just a change), use
+`--full`:
+
+```sh
+review-fabric --full /path/to/repository [--revision HEAD]
+```
+
+`--full` diffs the whole tree against the well-known empty Git tree object — every
+tracked file is treated as newly added — and never accepts `base`/`head` positional
+arguments (use `--revision` to pick a commit other than `HEAD`). Because a whole
+codebase almost always exceeds the bounded per-review patch size, `--full` splits the
+evidence into file-aligned chunks and runs one independent, independently-replayable
+review per chunk, printing one artifact directory per chunk. Cross-file interaction
+awareness is limited to whichever files land in the same chunk — there is no way to
+give a reviewer truly whole-repository-at-once context without an unbounded prompt.
+A single file whose own diff alone still exceeds the byte cap is never silently
+dropped or truncated: it is skipped, clearly reported on stdout/stderr with its exact
+path, and the command exits non-zero — every other chunk is still reviewed. Raise the
+per-chunk (or per-PR) cap with `--max-patch-bytes` if this happens (e.g. for a large
+generated file such as a lockfile) or review that file separately.
 
 MVP non-goals: browser-token scraping, credential persistence in project files, automatic remediation, network publishing, and unbounded reviewer debate.
 

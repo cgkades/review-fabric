@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 
 import review_fabric.cli as cli
-from review_fabric.cli import run
+from review_fabric.cli import main, run, run_full
 from review_fabric.configuration import ProviderBinding, ReviewConfiguration, Transport
 from review_fabric.domain.policy import ReviewPolicy, RiskIndicator
 from review_fabric.reviewers.base import FakeReviewer, RoleRubric
@@ -294,6 +294,121 @@ def test_cli_parser_accepts_declared_risk() -> None:
     parsed = cli.build_parser().parse_args(["--risk", "concurrency", "/repo", "base", "head"])
 
     assert parsed.risk == ["concurrency"]
+
+
+def test_cli_full_and_pr_flags_are_mutually_exclusive() -> None:
+    assert main(["--pr", "--full", "/repo", "base", "head"]) == 2
+
+
+def test_cli_full_rejects_base_and_head_positionals(tmp_path: Path) -> None:
+    assert main(["--full", str(tmp_path), "base", "head"]) == 2
+
+
+def test_run_full_reviews_every_tracked_file_as_one_chunk(tmp_path: Path) -> None:
+    repository = tmp_path / "fixture"
+    repository.mkdir()
+    git(repository, "init", "-q")
+    git(repository, "config", "user.email", "test@example.invalid")
+    git(repository, "config", "user.name", "Test")
+    (repository / "a.py").write_text("value = 1\n")
+    (repository / "b.py").write_text("value = 2\n")
+    git(repository, "add", ".")
+    git(repository, "commit", "-qm", "base")
+
+    result = run_full(repository)
+
+    assert len(result.directories) == 1
+    assert result.oversized_chunks == ()
+    events = [
+        json.loads(line)
+        for line in (result.directories[0] / "events.jsonl").read_text().splitlines()
+    ]
+    package_event = next(event for event in events if event["phase"] == "package")
+    assert package_event["payload"]["selected_paths"] == ["a.py", "b.py"]
+    manifest = json.loads((result.directories[0] / "manifest.json").read_text())
+    assert manifest["package"]["base_sha"] == "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+
+
+def test_run_full_splits_into_multiple_chunks_when_over_the_byte_cap(
+    tmp_path: Path,
+) -> None:
+    repository = tmp_path / "fixture"
+    repository.mkdir()
+    git(repository, "init", "-q")
+    git(repository, "config", "user.email", "test@example.invalid")
+    git(repository, "config", "user.name", "Test")
+    (repository / "a.py").write_text("x = 1\n" * 500)
+    (repository / "b.py").write_text("y = 2\n" * 500)
+    git(repository, "add", ".")
+    git(repository, "commit", "-qm", "base")
+
+    result = run_full(repository, max_patch_bytes=5000)
+
+    assert len(result.directories) == 2
+    assert result.oversized_chunks == ()
+    all_paths: list[str] = []
+    for directory in result.directories:
+        events = [
+            json.loads(line) for line in (directory / "events.jsonl").read_text().splitlines()
+        ]
+        package_event = next(event for event in events if event["phase"] == "package")
+        all_paths.extend(package_event["payload"]["selected_paths"])
+    assert sorted(all_paths) == ["a.py", "b.py"]
+
+
+def test_run_full_defaults_max_patch_bytes_from_cli(tmp_path: Path) -> None:
+    repository = tmp_path / "fixture"
+    repository.mkdir()
+    git(repository, "init", "-q")
+    git(repository, "config", "user.email", "test@example.invalid")
+    git(repository, "config", "user.name", "Test")
+    (repository / "a.py").write_text("value = 1\n")
+    git(repository, "add", ".")
+    git(repository, "commit", "-qm", "base")
+
+    assert main(["--full", str(repository)]) == 0
+
+
+def test_run_full_skips_but_reports_a_single_file_that_alone_exceeds_the_cap(
+    tmp_path: Path,
+) -> None:
+    """A single file's own diff exceeding max_patch_bytes must not silently drop
+    that file, silently succeed as if nothing happened, or abort every other chunk
+    — it must be skipped, clearly reported, and every other chunk still reviewed."""
+    repository = tmp_path / "fixture"
+    repository.mkdir()
+    git(repository, "init", "-q")
+    git(repository, "config", "user.email", "test@example.invalid")
+    git(repository, "config", "user.name", "Test")
+    (repository / "huge.py").write_text("x = 1\n" * 2000)
+    (repository / "small.py").write_text("value = 1\n")
+    git(repository, "add", ".")
+    git(repository, "commit", "-qm", "base")
+
+    result = run_full(repository, max_patch_bytes=5000)
+
+    assert len(result.oversized_chunks) == 1
+    assert result.oversized_chunks[0]["paths"] == ("huge.py",)
+    assert len(result.directories) == 1
+    events = [
+        json.loads(line)
+        for line in (result.directories[0] / "events.jsonl").read_text().splitlines()
+    ]
+    package_event = next(event for event in events if event["phase"] == "package")
+    assert package_event["payload"]["selected_paths"] == ["small.py"]
+
+
+def test_cli_full_reports_oversized_chunk_and_exits_nonzero(tmp_path: Path) -> None:
+    repository = tmp_path / "fixture"
+    repository.mkdir()
+    git(repository, "init", "-q")
+    git(repository, "config", "user.email", "test@example.invalid")
+    git(repository, "config", "user.name", "Test")
+    (repository / "huge.py").write_text("x = 1\n" * 2000)
+    git(repository, "add", ".")
+    git(repository, "commit", "-qm", "base")
+
+    assert main(["--full", str(repository), "--max-patch-bytes", "5000"]) == 2
 
 
 def test_cli_rejects_invalid_range_without_creating_artifact(tmp_path: Path) -> None:

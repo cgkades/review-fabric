@@ -113,6 +113,34 @@ def test_frozen_patch_evidence_is_bounded_digest_verified_and_cites_exact_head_l
     )
 
 
+def test_frozen_patch_evidence_default_bound_rejects_an_oversized_patch() -> None:
+    with pytest.raises(ValueError, match="exceeds byte limit"):
+        FrozenPatchEvidence.from_patch("x" * (60 * 1024))
+
+
+def test_frozen_patch_evidence_max_bytes_override_is_honored() -> None:
+    patch = "x" * (60 * 1024)
+
+    evidence = FrozenPatchEvidence.from_patch(patch, max_bytes=100 * 1024)
+
+    assert len(evidence.patch) == len(patch)
+
+
+def test_frozen_patch_evidence_max_bytes_override_survives_embedding_in_a_package() -> None:
+    """Regression: pydantic reruns FrozenPatchEvidence's own model validator when an
+    already-built instance is embedded as a field value into ReviewPackage. That
+    revalidation pass has no access to the original from_patch(max_bytes=...) call's
+    context, so a raised bound must not be silently forgotten and re-checked against
+    the conservative default on the second pass."""
+    patch = "x" * (60 * 1024)
+    evidence = FrozenPatchEvidence.from_patch(patch, max_bytes=100 * 1024)
+
+    package = make_package(patch_digest=evidence.digest, patch_evidence=evidence)
+
+    assert package.patch_evidence is not None
+    assert len(package.patch_evidence.patch) == len(patch)
+
+
 def test_review_package_rejects_patch_evidence_with_mismatched_digest() -> None:
     evidence = FrozenPatchEvidence.from_patch(
         "diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n@@ -0,0 +1 @@\n+value = 1\n"

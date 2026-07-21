@@ -72,3 +72,51 @@ challenge-capability and `DeniedMutationError` checks (the parallel commit still
 `ChallengeCitation`, finding-group clustering by citation overlap, `main([])`
 falsy-empty-list fix, uniform argparse error prefix, bounded `keyring` dependency pin,
 and versioned `review_id` identity computation.
+
+## Follow-up round: secret-guard false positives + --pr/--full
+
+Running review-fabric on its own diff surfaced real false positives in the secret
+guard (`evidence/git.py::_reject_secret_material`), and a feature request for
+reviewing an entire codebase, not just a bounded diff.
+
+- **Secret-guard false positives fixed** (all same-value structural checks — never a
+  nearby-word bypass, so this cannot reintroduce the original F002 vulnerability):
+  - A strictly sequential/repeated-character value (e.g. `abcdefghijklmnopqrstuvwxyz`,
+    `xxxxxxxxxxxx`, `0123456789`) is structurally impossible as a real credential.
+  - An exact match against a small curated list of literal placeholder words
+    (`secret`, `password`, `changeme`, etc.) — not a substring match anywhere on the
+    line.
+  - A short, purely-lowercase-letters-and-hyphens value (e.g. `leak`, `not-allowed`,
+    `str`) — real credentials always mix case/digits/punctuation for entropy, and
+    this also fixes a genuine regex flaw where a Python type annotation like
+    `secret: str` (a parameter declaration, not an assignment) was mistaken for a
+    real secret assignment. That specific flaw will recur constantly in any normal
+    Python codebase under `--full`, not just in this repo's tests.
+  - Verified: zero remaining false positives scanning this entire repository's
+    tracked tree end to end.
+- **`--pr`**: implemented as a pure, optional, no-op alias confirming bounded
+  base/head diff mode (your call — no new capability).
+- **`--full`**: implemented as a genuinely new evidence-collection mode
+  (`collect_full_tree_evidence`, diffing against the well-known empty Git tree
+  object) plus automatic file-aligned chunking (`split_patch_into_chunks`) so a whole
+  codebase's evidence is split into independently-bounded, independently-replayable
+  reviews instead of hitting the patch-size cap. Implemented your "1 and 2"
+  recommendation together: `--max-patch-bytes` makes the cap configurable, and
+  oversized input is auto-chunked by file rather than rejected outright. A single
+  file whose own diff alone still exceeds the cap (found in the wild: this repo's
+  `uv.lock`) is skipped with a clear, actionable message and a non-zero exit code —
+  never silently dropped — while every other chunk still completes.
+- **Known, honest limitation:** "checking interactions between files" is real but
+  bounded — a reviewer only sees whichever files land together in the same chunk
+  (chosen by size, not by import/call relationships). There is no way to give a
+  reviewer truly whole-repository-at-once context without an unbounded prompt; I did
+  not attempt call-graph-aware chunking (that would need real static analysis, not
+  just prompt engineering) — flagging this now rather than overstating what v1 does.
+- Found and fixed one subtle bug along the way: pydantic reruns a model's own
+  `@model_validator` when an already-built instance is embedded as a field value into
+  a parent model, without the original call's validation context — so a
+  caller-raised `max_bytes` was being silently forgotten and re-checked against the
+  conservative default the moment `FrozenPatchEvidence` was attached to a
+  `ReviewPackage`. Fixed by moving the *configurable* bound check into `from_patch()`
+  itself (plain Python, checked once) and keeping only a fixed, generous (64 MB)
+  absolute ceiling in the model validator, which is safe to recheck unconditionally.
