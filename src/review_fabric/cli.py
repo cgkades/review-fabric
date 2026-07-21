@@ -27,6 +27,7 @@ from review_fabric.evidence.git import (
     collect_git_evidence,
     split_patch_into_chunks,
 )
+from review_fabric.evidence.github import PullRequestEvidence, resolve_pull_request
 from review_fabric.orchestration import execute_plan
 from review_fabric.reviewers.base import FakeReviewer, RoleRubric
 from review_fabric.reviewers.providers import ProviderReviewer
@@ -85,13 +86,29 @@ def build_parser() -> argparse.ArgumentParser:
         help="declared risk indicator requiring specialist review",
     )
     parser.add_argument(
-        "--pr",
+        "--diff",
         metavar="BASE..HEAD",
         help=(
             "review a bounded diff given as a single git-style revision range "
             '("BASE..HEAD"), instead of the base/head positional arguments '
             "(equivalent; do not pass both forms at once)"
         ),
+    )
+    parser.add_argument(
+        "--pr",
+        metavar="REF",
+        help=(
+            "review an actual GitHub pull request, given as anything `gh pr view` "
+            "accepts (a number, a URL, or a branch name); requires the gh CLI to be "
+            "installed and already authenticated (gh auth login) and repository to "
+            "be given. Fetches the exact base/head commits into a private, "
+            "tool-owned ref namespace; does not touch any ref you use yourself."
+        ),
+    )
+    parser.add_argument(
+        "--remote",
+        default="origin",
+        help="remote to fetch pull request commits from with --pr (default: origin)",
     )
     parser.add_argument(
         "--full",
@@ -388,25 +405,35 @@ def main(arguments: list[str] | None = None) -> int:
         if arguments and arguments[0] == "auth":
             return _run_auth(arguments[1:])
         parsed = build_parser().parse_args(arguments)
-        if parsed.pr and parsed.full:
-            raise ReviewFabricError("--pr and --full are mutually exclusive")
-        if parsed.pr and (parsed.base or parsed.head):
-            raise ReviewFabricError(
-                "--pr already supplies base and head; do not also pass them positionally"
-            )
+        modes = {
+            "--pr": bool(parsed.pr),
+            "--diff": bool(parsed.diff),
+            "--full": bool(parsed.full),
+            "base/head positional arguments": bool(parsed.base or parsed.head),
+        }
+        selected_modes = [name for name, active in modes.items() if active]
+        if len(selected_modes) > 1:
+            raise ReviewFabricError(f"{' and '.join(selected_modes)} are mutually exclusive")
+
         base, head = parsed.base, parsed.head
-        if parsed.pr is not None:
-            pr_base, separator, pr_head = parsed.pr.partition("..")
-            if not separator or not pr_base or not pr_head:
+        pr_number: str | None = None
+        if parsed.diff is not None:
+            diff_base, separator, diff_head = parsed.diff.partition("..")
+            if not separator or not diff_base or not diff_head:
                 raise ReviewFabricError(
-                    '--pr must be given as a single "BASE..HEAD" revision range'
+                    '--diff must be given as a single "BASE..HEAD" revision range'
                 )
-            base, head = pr_base, pr_head
+            base, head = diff_base, diff_head
+        elif parsed.pr is not None:
+            if not parsed.repository:
+                raise ReviewFabricError("repository is required")
+            resolved: PullRequestEvidence = resolve_pull_request(
+                parsed.repository, parsed.pr, remote=parsed.remote
+            )
+            base, head = resolved.base_sha, resolved.head_sha
+            pr_number = resolved.number
+
         if parsed.full:
-            if base or head:
-                raise ReviewFabricError(
-                    "--full reviews the whole tree; use --revision instead of base/head"
-                )
             if not parsed.repository:
                 raise ReviewFabricError("repository is required")
             result = run_full(
@@ -431,12 +458,13 @@ def main(arguments: list[str] | None = None) -> int:
             return 2 if result.oversized_chunks else 0
         if not (parsed.repository and base and head):
             raise ReviewFabricError("repository, base, and head are required")
+        constraints = (*parsed.constraint, *((f"pr:{pr_number}",) if pr_number else ()))
         print(
             run(
                 parsed.repository,
                 base,
                 head,
-                tuple(parsed.constraint),
+                constraints,
                 tuple(RiskIndicator(risk) for risk in parsed.risk),
                 configuration_path=parsed.config,
                 env_file=parsed.env_file,

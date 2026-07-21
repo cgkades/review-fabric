@@ -6,6 +6,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 import review_fabric.cli as cli
 from review_fabric.cli import main, run, run_full
 from review_fabric.configuration import ProviderBinding, ReviewConfiguration, Transport
@@ -296,12 +298,12 @@ def test_cli_parser_accepts_declared_risk() -> None:
     assert parsed.risk == ["concurrency"]
 
 
-def test_cli_full_and_pr_flags_are_mutually_exclusive() -> None:
-    assert main(["--pr", "base..head", "--full", "/repo"]) == 2
+def test_cli_full_and_diff_flags_are_mutually_exclusive() -> None:
+    assert main(["--diff", "base..head", "--full", "/repo"]) == 2
 
 
-def test_cli_pr_takes_a_single_base_head_range_token(tmp_path: Path) -> None:
-    """--pr must not use argparse's multi-value nargs, which greedily (and
+def test_cli_diff_takes_a_single_base_head_range_token(tmp_path: Path) -> None:
+    """--diff must not use argparse's multi-value nargs, which greedily (and
     ambiguously) swallows a following flag like --full as a plain string instead of
     recognizing it — this exercises the safe, single-token "BASE..HEAD" syntax."""
     repository = tmp_path / "fixture"
@@ -317,20 +319,117 @@ def test_cli_pr_takes_a_single_base_head_range_token(tmp_path: Path) -> None:
     git(repository, "commit", "-am", "change", "-q")
     head = git(repository, "rev-parse", "HEAD")
 
-    via_pr = main(["--pr", f"{base}..{head}", str(repository)])
+    via_diff = main(["--diff", f"{base}..{head}", str(repository)])
     via_positional = main([str(repository), base, head])
 
-    assert via_pr == 0
+    assert via_diff == 0
     assert via_positional == 0
 
 
-def test_cli_pr_rejects_malformed_range() -> None:
+def test_cli_diff_rejects_malformed_range() -> None:
     for value in ("no-separator", "base..", "..head", ".."):
-        assert main(["--pr", value, "/repo"]) == 2
+        assert main(["--diff", value, "/repo"]) == 2
+
+
+def test_cli_diff_rejects_combination_with_positional_base_head() -> None:
+    assert main(["--diff", "base..head", "/repo", "base", "head"]) == 2
+
+
+def test_cli_pr_uses_gh_to_resolve_and_fetch_then_runs_a_bounded_review(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    repository = tmp_path / "fixture"
+    repository.mkdir()
+    git(repository, "init", "-q")
+    git(repository, "config", "user.email", "test@example.invalid")
+    git(repository, "config", "user.name", "Test")
+    (repository / "example.py").write_text("value = 1\n")
+    git(repository, "add", ".")
+    git(repository, "commit", "-qm", "base")
+    base = git(repository, "rev-parse", "HEAD")
+    (repository / "example.py").write_text("value = 2\n")
+    git(repository, "commit", "-am", "change", "-q")
+    head = git(repository, "rev-parse", "HEAD")
+
+    calls: list[tuple[Path, str, str]] = []
+
+    def fake_resolve(repo: Path, reference: str, *, remote: str) -> cli.PullRequestEvidence:
+        calls.append((repo, reference, remote))
+        return cli.PullRequestEvidence(
+            number="42", base_sha=base, head_sha=head, base_ref="main", url="https://x"
+        )
+
+    monkeypatch.setattr(cli, "resolve_pull_request", fake_resolve)
+
+    assert main(["--pr", "42", str(repository)]) == 0
+    assert calls == [(repository, "42", "origin")]
+    artifact = Path(capsys.readouterr().out.strip())
+    manifest = json.loads((artifact / "manifest.json").read_text())
+    assert "pr:42" in manifest["package"]["constraints"]
+
+
+def test_cli_pr_passes_through_the_remote_flag(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repository = tmp_path / "fixture"
+    repository.mkdir()
+    git(repository, "init", "-q")
+    git(repository, "config", "user.email", "test@example.invalid")
+    git(repository, "config", "user.name", "Test")
+    (repository / "example.py").write_text("value = 1\n")
+    git(repository, "add", ".")
+    git(repository, "commit", "-qm", "base")
+    base = git(repository, "rev-parse", "HEAD")
+    (repository / "example.py").write_text("value = 2\n")
+    git(repository, "commit", "-am", "change", "-q")
+    head = git(repository, "rev-parse", "HEAD")
+
+    calls: list[str] = []
+
+    def fake_resolve(repo: Path, reference: str, *, remote: str) -> cli.PullRequestEvidence:
+        calls.append(remote)
+        return cli.PullRequestEvidence(
+            number="7", base_sha=base, head_sha=head, base_ref="main", url="https://x"
+        )
+
+    monkeypatch.setattr(cli, "resolve_pull_request", fake_resolve)
+
+    assert main(["--pr", "7", "--remote", "upstream", str(repository)]) == 0
+    assert calls == ["upstream"]
+
+
+def test_cli_pr_requires_a_repository() -> None:
+    assert main(["--pr", "42"]) == 2
+
+
+def test_cli_pr_and_full_are_mutually_exclusive() -> None:
+    assert main(["--pr", "42", "--full", "/repo"]) == 2
+
+
+def test_cli_pr_and_diff_are_mutually_exclusive() -> None:
+    assert main(["--pr", "42", "--diff", "base..head", "/repo"]) == 2
 
 
 def test_cli_pr_rejects_combination_with_positional_base_head() -> None:
-    assert main(["--pr", "base..head", "/repo", "base", "head"]) == 2
+    assert main(["--pr", "42", "/repo", "base", "head"]) == 2
+
+
+def test_cli_pr_surfaces_gh_resolution_failure_without_creating_an_artifact(
+    tmp_path: Path,
+) -> None:
+    repository = tmp_path / "fixture"
+    repository.mkdir()
+    git(repository, "init", "-q")
+    git(repository, "config", "user.email", "test@example.invalid")
+    git(repository, "config", "user.name", "Test")
+    (repository / "example.py").write_text("value = 1\n")
+    git(repository, "add", ".")
+    git(repository, "commit", "-qm", "base")
+
+    # No gh CLI is expected to be authenticated against a real GitHub repo in this
+    # throwaway fixture, so resolution must fail cleanly rather than hang or crash.
+    assert main(["--pr", "999999", str(repository)]) == 2
+    assert not (repository / ".review-fabric").exists()
 
 
 def test_cli_full_rejects_base_and_head_positionals(tmp_path: Path) -> None:

@@ -136,3 +136,32 @@ neighboring flag this way — argparse itself now refuses ambiguous input
 (`argument --pr: expected one argument`) rather than silently misparsing. The
 positional `base`/`head` form still works unchanged; the two forms must not be
 combined.
+
+## Follow-up: --pr moved to --diff, real --pr added (fetches an actual GitHub PR)
+
+Per your explicit call: renamed the BASE..HEAD single-token flag from `--pr` to
+`--diff` (unchanged behavior otherwise), and built a genuinely new `--pr <ref>` that
+resolves and reviews an actual GitHub pull request.
+
+- New `evidence/github.py::resolve_pull_request()`: shells out to `gh pr view <ref>
+  --json ...` (accepts a PR number, URL, or branch name — anything `gh pr view`
+  accepts) to get the exact current base/head commit SHAs, then `git fetch`es both
+  into a private ref namespace (`refs/review-fabric/pr-<number>-{head,base}`) —
+  never touching a branch/tag the operator uses. GitHub always exposes
+  `refs/pull/<number>/head` on the base repository regardless of whether the PR
+  originates from a fork, so this works for fork PRs too.
+- Delegates entirely to `gh`'s own already-configured authentication (`gh auth
+  login`) — review-fabric never requests, stores, or scrapes a GitHub credential
+  itself. This is the one deliberately network-touching evidence path in the tool;
+  documented explicitly in the README's safety section as the one exception to
+  "never mutates the reviewed repository" (it adds refs, never branches/commits).
+- Once resolved, the PR's base/head SHAs feed into the exact same bounded-diff
+  pipeline as `--diff`/positional base/head — no separate code path, so it gets the
+  same secret-detection, redaction, locking, and artifact guarantees automatically.
+  Records a `pr:<number>` constraint in the persisted package for audit purposes.
+- `--pr`, `--diff`, `--full`, and positional `base`/`head` are all now mutually
+  exclusive (previously only `--full` vs. the diff-like modes was checked).
+- gh/git failure messages are deliberately generic (never embed raw subprocess
+  stderr), matching the rest of the codebase's redaction discipline — verified with
+  a test asserting a simulated leaked token in `gh`'s stderr never appears in the
+  raised error.

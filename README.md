@@ -6,6 +6,8 @@ Review Fabric is an evidence-driven, local code-review protocol. It captures an 
 
 The MVP is read-only with respect to reviewed source: it never edits source, commits, pushes, merges, or posts provider/GitHub feedback. The only product-created files are local `.review-fabric` artifacts. Artifacts are append-only machine records plus a summary regenerated solely from those records. Secret values are redacted and are never retained in configuration, artifacts, summaries, or error records.
 
+The one exception is `--pr`: it runs a `git fetch` to make a pull request's exact commits available locally, writing new refs only under its own private `refs/review-fabric/pr-<number>-*` namespace — never a branch, tag, or any ref you use yourself, and never a commit, push, or merge.
+
 Low-risk changes use at most one reviewer and no challenge. Authorization, destructive-data, retry/idempotency, concurrency, migration, and infrastructure indicators select specialist roles and permit one evidence-limited challenge round. Missing reviewers, invalid output, timeouts, or provider errors produce explicit incomplete/escalated records—not fabricated verdicts.
 
 ## Providers and credentials
@@ -18,12 +20,31 @@ Run a local package capture with:
 review-fabric /path/to/repository BASE_SHA HEAD_SHA
 ```
 
-`--pr` is an equivalent, optional single-token form of the same bounded diff mode —
-`review-fabric --pr BASE_SHA..HEAD_SHA /path/to/repository` — for callers that prefer
-one revision-range argument over two positionals; it changes nothing about the
-review itself, and the two forms must not both be given. This creates an explicit
-escalation if no configured reviewers are supplied. Regenerate a report with
-`review-fabric summary .review-fabric/reviews/REVIEW_ID`.
+`--diff` is an equivalent, optional single-token form of the same bounded diff mode —
+`review-fabric --diff BASE_SHA..HEAD_SHA /path/to/repository` — for callers that
+prefer one revision-range argument over two positionals; it changes nothing about
+the review itself, and the two forms must not both be given. This creates an
+explicit escalation if no configured reviewers are supplied. Regenerate a report
+with `review-fabric summary .review-fabric/reviews/REVIEW_ID`.
+
+To review an actual GitHub pull request instead of manually resolving its base/head
+commits yourself, use `--pr`:
+
+```sh
+review-fabric --pr 123 /path/to/repository
+```
+
+`--pr` accepts anything `gh pr view` accepts (a number, a URL, or a branch name).
+This is the one deliberately network-touching evidence path in review-fabric —
+everything else is local-only unless a provider is separately configured with
+`--config`. It requires the `gh` CLI to be installed and already authenticated
+(`gh auth login`); review-fabric never requests, scrapes, or stores a GitHub
+credential itself — it delegates entirely to `gh`'s own authentication. It fetches
+exactly the pull request's current base and head commits into a private, tool-owned
+ref namespace (`refs/review-fabric/pr-<number>-*`), never touching any ref you use
+yourself, then reviews that bounded diff exactly like `--diff`/positional base/head.
+Use `--remote` to fetch from a remote other than `origin` (default `origin`).
+`--pr`, `--diff`, `--full`, and positional `base`/`head` are all mutually exclusive.
 
 To review an entire tracked codebase instead of a bounded diff (e.g. no meaningful
 base commit exists, or you want every file assessed rather than just a change), use
