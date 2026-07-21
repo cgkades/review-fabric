@@ -297,7 +297,40 @@ def test_cli_parser_accepts_declared_risk() -> None:
 
 
 def test_cli_full_and_pr_flags_are_mutually_exclusive() -> None:
-    assert main(["--pr", "--full", "/repo", "base", "head"]) == 2
+    assert main(["--pr", "base..head", "--full", "/repo"]) == 2
+
+
+def test_cli_pr_takes_a_single_base_head_range_token(tmp_path: Path) -> None:
+    """--pr must not use argparse's multi-value nargs, which greedily (and
+    ambiguously) swallows a following flag like --full as a plain string instead of
+    recognizing it — this exercises the safe, single-token "BASE..HEAD" syntax."""
+    repository = tmp_path / "fixture"
+    repository.mkdir()
+    git(repository, "init", "-q")
+    git(repository, "config", "user.email", "test@example.invalid")
+    git(repository, "config", "user.name", "Test")
+    (repository / "example.py").write_text("value = 1\n")
+    git(repository, "add", ".")
+    git(repository, "commit", "-qm", "base")
+    base = git(repository, "rev-parse", "HEAD")
+    (repository / "example.py").write_text("value = 2\n")
+    git(repository, "commit", "-am", "change", "-q")
+    head = git(repository, "rev-parse", "HEAD")
+
+    via_pr = main(["--pr", f"{base}..{head}", str(repository)])
+    via_positional = main([str(repository), base, head])
+
+    assert via_pr == 0
+    assert via_positional == 0
+
+
+def test_cli_pr_rejects_malformed_range() -> None:
+    for value in ("no-separator", "base..", "..head", ".."):
+        assert main(["--pr", value, "/repo"]) == 2
+
+
+def test_cli_pr_rejects_combination_with_positional_base_head() -> None:
+    assert main(["--pr", "base..head", "/repo", "base", "head"]) == 2
 
 
 def test_cli_full_rejects_base_and_head_positionals(tmp_path: Path) -> None:

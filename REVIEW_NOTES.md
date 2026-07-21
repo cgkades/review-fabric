@@ -120,3 +120,19 @@ reviewing an entire codebase, not just a bounded diff.
   `ReviewPackage`. Fixed by moving the *configurable* bound check into `from_patch()`
   itself (plain Python, checked once) and keeping only a fixed, generous (64 MB)
   absolute ceiling in the model validator, which is safe to recheck unconditionally.
+
+## Follow-up: --pr redesigned to take BASE..HEAD directly
+
+Initial `--pr` was a pure no-op boolean flag (positional base/head did all the work).
+You expected `--pr` to actually take the two revisions itself, symmetric with
+`--full`/`--revision`. First attempt used `nargs=2` (`--pr BASE HEAD`) — this had a
+real, confirmed argparse footgun: an optional argument with `nargs=2` greedily
+consumes the next two tokens as plain strings even if one of them is another
+registered flag (e.g. `--pr --full /repo` silently became `pr=['--full', '/repo']`,
+`full=False`, with `repository` scrambled to the string `"base"` — no error at all).
+Redesigned to a single git-style revision-range token instead:
+`--pr BASE..HEAD` (e.g. `--pr abc123..def456`). A single-value option can't swallow a
+neighboring flag this way — argparse itself now refuses ambiguous input
+(`argument --pr: expected one argument`) rather than silently misparsing. The
+positional `base`/`head` form still works unchanged; the two forms must not be
+combined.

@@ -86,10 +86,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--pr",
-        action="store_true",
+        metavar="BASE..HEAD",
         help=(
-            "explicit alias confirming bounded diff mode (base/head positional "
-            "arguments); no behavior change from the default mode"
+            "review a bounded diff given as a single git-style revision range "
+            '("BASE..HEAD"), instead of the base/head positional arguments '
+            "(equivalent; do not pass both forms at once)"
         ),
     )
     parser.add_argument(
@@ -389,8 +390,20 @@ def main(arguments: list[str] | None = None) -> int:
         parsed = build_parser().parse_args(arguments)
         if parsed.pr and parsed.full:
             raise ReviewFabricError("--pr and --full are mutually exclusive")
+        if parsed.pr and (parsed.base or parsed.head):
+            raise ReviewFabricError(
+                "--pr already supplies base and head; do not also pass them positionally"
+            )
+        base, head = parsed.base, parsed.head
+        if parsed.pr is not None:
+            pr_base, separator, pr_head = parsed.pr.partition("..")
+            if not separator or not pr_base or not pr_head:
+                raise ReviewFabricError(
+                    '--pr must be given as a single "BASE..HEAD" revision range'
+                )
+            base, head = pr_base, pr_head
         if parsed.full:
-            if parsed.base or parsed.head:
+            if base or head:
                 raise ReviewFabricError(
                     "--full reviews the whole tree; use --revision instead of base/head"
                 )
@@ -416,13 +429,13 @@ def main(arguments: list[str] | None = None) -> int:
                 print(message, flush=True)
                 logger.error(message)
             return 2 if result.oversized_chunks else 0
-        if not (parsed.repository and parsed.base and parsed.head):
+        if not (parsed.repository and base and head):
             raise ReviewFabricError("repository, base, and head are required")
         print(
             run(
                 parsed.repository,
-                parsed.base,
-                parsed.head,
+                base,
+                head,
                 tuple(parsed.constraint),
                 tuple(RiskIndicator(risk) for risk in parsed.risk),
                 configuration_path=parsed.config,

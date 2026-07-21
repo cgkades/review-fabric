@@ -18,9 +18,12 @@ Run a local package capture with:
 review-fabric /path/to/repository BASE_SHA HEAD_SHA
 ```
 
-`--pr` is an explicit, optional alias confirming this bounded diff mode; it changes
-nothing. This creates an explicit escalation if no configured reviewers are supplied.
-Regenerate a report with `review-fabric summary .review-fabric/reviews/REVIEW_ID`.
+`--pr` is an equivalent, optional single-token form of the same bounded diff mode —
+`review-fabric --pr BASE_SHA..HEAD_SHA /path/to/repository` — for callers that prefer
+one revision-range argument over two positionals; it changes nothing about the
+review itself, and the two forms must not both be given. This creates an explicit
+escalation if no configured reviewers are supplied. Regenerate a report with
+`review-fabric summary .review-fabric/reviews/REVIEW_ID`.
 
 To review an entire tracked codebase instead of a bounded diff (e.g. no meaningful
 base commit exists, or you want every file assessed rather than just a change), use
