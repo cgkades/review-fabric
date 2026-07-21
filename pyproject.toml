@@ -9,7 +9,7 @@ description = "Evidence-driven multi-agent code-review orchestration"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-  "keyring>=25.7.0",
+  "keyring>=25.7.0,<26",
   "pydantic>=2.10,<3",
 ]
 

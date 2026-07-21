@@ -225,7 +225,12 @@ class ArtifactStore:
         return records
 
     def record_event(self, phase: str, payload: dict[str, Any]) -> None:
-        """Append one schema-versioned phase event and refresh the derived report."""
+        """Append one schema-versioned phase event and incrementally extend the
+        derived report — never a full events.jsonl reparse + summary.md rewrite per
+        call, so cost per event stays O(1) instead of compounding to O(events) as a
+        review accumulates more phases. (Safe without additional locking: every
+        caller already holds ArtifactStore.acquire_package_lock for the whole run.)
+        """
         if not phase:
             raise InvalidReviewPackageError("artifact event phase is required")
         event = {
@@ -238,6 +243,7 @@ class ArtifactStore:
         events_path = self.directory / "events.jsonl"
         if events_path.is_symlink():
             raise InvalidReviewPackageError("existing artifact path is unsafe")
+        is_first_event = events_path.stat().st_size == 0
         descriptor = os.open(
             events_path,
             os.O_WRONLY | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0),
@@ -246,10 +252,58 @@ class ArtifactStore:
             events.write(canonical_json_bytes(event) + b"\n")
             events.flush()
             os.fsync(events.fileno())
-        self.regenerate_summary()
+        self._append_summary_event(event, is_first_event=is_first_event)
+
+    def _append_summary_event(self, event: dict[str, Any], *, is_first_event: bool) -> None:
+        """Extend summary.md with exactly the new event's rendered line.
+
+        Produces output byte-identical to a from-scratch regenerate_summary() call at
+        every step: the very first event replaces the "No phases recorded."
+        placeholder instead of appending after it; every subsequent event is a plain
+        append. Falls back to a full regenerate_summary() if summary.md is missing or
+        doesn't look like what this method expects, so an unexpected on-disk state
+        (e.g. a user manually deleted or edited the file) self-heals instead of
+        silently producing a wrong report.
+        """
+        rendered_line = self._render_event_line(event)
+        summary_path = self.directory / "summary.md"
+        if not is_first_event:
+            if not summary_path.exists() or summary_path.is_symlink():
+                self.regenerate_summary()
+                return
+            descriptor = os.open(
+                summary_path, os.O_WRONLY | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0)
+            )
+            with os.fdopen(descriptor, "ab") as summary:
+                summary.write((rendered_line + "\n").encode("utf-8"))
+                summary.flush()
+                os.fsync(summary.fileno())
+            return
+        try:
+            content = summary_path.read_text(encoding="utf-8")
+        except (FileNotFoundError, OSError):
+            self.regenerate_summary()
+            return
+        placeholder = "- No phases recorded.\n"
+        if summary_path.is_symlink() or placeholder not in content:
+            self.regenerate_summary()
+            return
+        updated = content.replace(placeholder, rendered_line + "\n", 1)
+        _write_private(summary_path, updated.encode("utf-8"))
+
+    @staticmethod
+    def _render_event_line(event: dict[str, Any]) -> str:
+        payload = json.dumps(event["payload"], sort_keys=True, separators=(",", ":"))
+        return f"- **{event['phase']}**: `{payload}`"
 
     def regenerate_summary(self) -> str:
-        """Render the report exclusively from persisted manifest and event records."""
+        """Render the report exclusively from persisted manifest and event records.
+
+        This does the full O(events) read + rebuild; record_event() no longer calls
+        this on every event (see _append_summary_event), but it remains available for
+        on-demand regeneration (the `review-fabric summary` CLI command, or self-heal
+        if summary.md is ever missing/unexpected).
+        """
         manifest_path = self.directory / "manifest.json"
         if manifest_path.is_symlink():
             raise InvalidReviewPackageError("existing artifact path is unsafe")
@@ -267,8 +321,7 @@ class ArtifactStore:
         if not events:
             lines.append("- No phases recorded.")
         for event in events:
-            payload = json.dumps(event["payload"], sort_keys=True, separators=(",", ":"))
-            lines.append(f"- **{event['phase']}**: `{payload}`")
+            lines.append(self._render_event_line(event))
         summary = "\n".join(lines) + "\n"
         _write_private(self.directory / "summary.md", summary.encode("utf-8"))
         return summary

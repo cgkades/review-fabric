@@ -32,7 +32,6 @@ def package() -> ReviewPackage:
         selected_paths=("src/example.py",),
         acceptance_criteria=(),
         constraints=("read-only",),
-        command_results=(),
     )
 
 
@@ -143,3 +142,46 @@ def test_store_package_lock_excludes_concurrent_process(tmp_path: Path) -> None:
     assert worker.exitcode == 0
     assert contender.exitcode == 0
     assert acquired.is_set()
+
+
+def test_record_event_appends_to_summary_without_a_full_rebuild(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """record_event() must extend summary.md incrementally, not re-read
+    events.jsonl and rewrite the whole file from scratch on every call — that would
+    make per-event cost grow with the number of prior events instead of staying
+    constant."""
+    store = ArtifactStore.create(tmp_path, package(), patch="diff --git a/x b/x\n")
+
+    calls = {"count": 0}
+    original_regenerate = ArtifactStore.regenerate_summary
+
+    def counting_regenerate(self: ArtifactStore) -> str:
+        calls["count"] += 1
+        return original_regenerate(self)
+
+    monkeypatch.setattr(ArtifactStore, "regenerate_summary", counting_regenerate)
+
+    for index in range(10):
+        store.record_event("decision", {"outcome": "CHANGE", "group_id": str(index)})
+
+    assert calls["count"] == 0  # the full rebuild path was never used
+    # The incrementally-built file must still exactly match a from-scratch rebuild.
+    incremental = (store.directory / "summary.md").read_text()
+    rebuilt = original_regenerate(store)
+    assert incremental == rebuilt
+    assert all(f'group_id":"{i}"' in incremental for i in range(10))
+
+
+def test_record_event_summary_append_self_heals_a_missing_summary_file(
+    tmp_path: Path,
+) -> None:
+    store = ArtifactStore.create(tmp_path, package(), patch="diff --git a/x b/x\n")
+    store.record_event("first-pass", {"status": "completed"})
+    (store.directory / "summary.md").unlink()
+
+    store.record_event("decision", {"outcome": "ACCEPT"})
+
+    summary = (store.directory / "summary.md").read_text()
+    assert "first-pass" in summary
+    assert "decision" in summary

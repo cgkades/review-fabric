@@ -12,6 +12,7 @@ from urllib.parse import urlparse
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
+from review_fabric.errors import InvalidConfigurationError
 from review_fabric.serialization import canonical_json_bytes
 
 
@@ -60,6 +61,17 @@ class ProviderBinding(BaseModel):
                 raise ValueError(
                     "bedrock IAM uses the standard credential chain, not a secret reference"
                 )
+        elif self.credential_source in {"aws-chain", "workload"}:
+            # Only bedrock-iam implements the AWS credential chain today. Reject this
+            # combination explicitly here rather than letting it validate with a
+            # placeholder credential_ref and only fail confusingly at invocation time
+            # (resolve_credential returns no credential for aws-chain/workload
+            # regardless of transport, and every other transport requires a bearer
+            # credential).
+            raise ValueError(
+                f"{self.transport.value} does not support the {self.credential_source} "
+                "credential chain; only bedrock-iam does"
+            )
         elif (
             not self.credential_ref
             or not _REFERENCE.fullmatch(self.credential_ref)
@@ -169,12 +181,14 @@ def load_configuration(path: Path, *, repository: Path | None = None) -> ReviewC
         resolved = path.resolve()
         root = repository.resolve()
         if resolved == root or root in resolved.parents:
-            raise ValueError("provider configuration must be outside the reviewed repository")
+            raise InvalidConfigurationError(
+                "provider configuration must be outside the reviewed repository"
+            )
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
-        raise ValueError(f"invalid review configuration: {path}") from error
+        raise InvalidConfigurationError(f"invalid review configuration: {path}") from error
     try:
         return ReviewConfiguration.model_validate(data)
     except ValidationError as error:
-        raise ValueError("invalid review configuration") from error
+        raise InvalidConfigurationError("invalid review configuration") from error

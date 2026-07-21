@@ -30,3 +30,13 @@ class PolicyRejectionError(ReviewFabricError):
 
 class DeniedMutationError(ReviewFabricError):
     """Raised when a read-only review attempts a prohibited mutation."""
+
+
+class InvalidConfigurationError(ReviewFabricError):
+    """Raised when a supplied provider-binding configuration file is invalid."""
+
+
+class UnsupportedArtifactSchemaError(ReviewFabricError):
+    """Raised when a persisted artifact's schema_version is not one this binary
+    understands, so a mismatch fails fast and clearly instead of raising a raw
+    KeyError/TypeError deep inside report rendering."""

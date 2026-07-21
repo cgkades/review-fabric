@@ -24,6 +24,7 @@ def binding() -> ProviderBinding:
 
 
 def test_process_environment_wins_over_private_gitignored_dotenv(tmp_path: Path) -> None:
+    subprocess.run(("git", "init", "-q"), cwd=tmp_path, check=True)
     dotenv = tmp_path / ".env"
     dotenv.write_text("OPENAI_API_KEY=dotenv-value\n")
     dotenv.chmod(0o600)
@@ -47,6 +48,21 @@ def test_dotenv_rejects_unsafe_or_tracked_files(tmp_path: Path) -> None:
     dotenv.chmod(0o600)
     subprocess.run(("git", "init", "-q"), cwd=tmp_path, check=True)
     subprocess.run(("git", "add", ".env"), cwd=tmp_path, check=True)
+    with pytest.raises(PolicyRejectionError, match="tracked"):
+        load_dotenv(dotenv, tmp_path)
+
+
+def test_dotenv_tracked_check_is_not_bypassed_by_a_dash_prefixed_filename(
+    tmp_path: Path,
+) -> None:
+    """A path starting with "-" must not be misread by git as an option, which would
+    make a genuinely tracked file appear untracked and load its secrets anyway."""
+    subprocess.run(("git", "init", "-q"), cwd=tmp_path, check=True)
+    dotenv = tmp_path / "-secrets.env"
+    dotenv.write_text("OPENAI_API_KEY=value\n")
+    dotenv.chmod(0o600)
+    subprocess.run(("git", "add", "--", "-secrets.env"), cwd=tmp_path, check=True)
+
     with pytest.raises(PolicyRejectionError, match="tracked"):
         load_dotenv(dotenv, tmp_path)
 

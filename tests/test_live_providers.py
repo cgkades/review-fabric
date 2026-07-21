@@ -33,7 +33,6 @@ def package() -> ReviewPackage:
         selected_paths=("src/a.py",),
         acceptance_criteria=(),
         constraints=("read-only",),
-        command_results=(),
         patch_evidence=evidence,
     )
 
@@ -267,10 +266,114 @@ def test_response_cap_and_unsupported_transport_are_safe() -> None:
         credential_source="aws-chain",
         region="us-west-2",
     )
-    with pytest.raises(PolicyRejectionError, match="unsupported"):
+    with pytest.raises(PolicyRejectionError, match="not yet implemented"):
         ProviderReviewer(unsupported, None, RoleRubric("correctness", "review")).review(
             package(), RoleRubric("correctness", "review")
         )
+
+
+@pytest.mark.parametrize(
+    "transport",
+    [Transport.AZURE_AI_FOUNDRY, Transport.OPENAI, Transport.ANTHROPIC, Transport.BEDROCK_IAM],
+)
+def test_every_not_yet_implemented_transport_fails_with_a_specific_reason(
+    transport: Transport,
+) -> None:
+    """Each schema-valid but not-yet-wired Transport must fail with a distinct,
+    honest reason rather than a generic message indistinguishable from a real
+    provider outage. (configuration.py rejects these earlier, at config load time;
+    this exercises the invocation-time backstop directly.)"""
+    kwargs: dict[str, object] = {
+        "provider": transport.value,
+        "transport": transport,
+        "model": "model-id",
+        "credential_source": "environment",
+        "credential_ref": "API_KEY",
+    }
+    if transport is Transport.AZURE_AI_FOUNDRY:
+        kwargs.update(endpoint="https://azure.example.test", deployment="deployment")
+    elif transport is Transport.BEDROCK_IAM:
+        kwargs.update(credential_source="aws-chain", credential_ref=None, region="us-west-2")
+    binding = ProviderBinding(**kwargs)  # type: ignore[arg-type]
+
+    reviewer = ProviderReviewer(binding, "secret", RoleRubric("correctness", "review"))
+    with pytest.raises(PolicyRejectionError, match="not yet implemented"):
+        reviewer.review(package(), reviewer.rubric)
+
+
+def test_oauth_transport_fails_without_client_or_token_scraping() -> None:
+    binding = ProviderBinding(
+        provider="official-client",
+        transport=Transport.OAUTH,
+        model="model-id",
+        credential_source="external-session",
+        credential_ref="official-client-profile",
+    )
+    reviewer = ProviderReviewer(binding, None, RoleRubric("correctness", "review"))
+
+    with pytest.raises(PolicyRejectionError, match="OAuth adapter unavailable"):
+        reviewer.review(package(), reviewer.rubric)
+
+
+def test_bedrock_converse_content_rejects_response_with_no_text_block() -> None:
+    """A response with only non-text blocks must raise InvalidReviewerOutputError, not
+    an uncaught StopIteration/AttributeError that would bypass the intended category."""
+
+    def opener(_request: object, _timeout: int) -> Response:
+        return Response(
+            b'{"output":{"message":{"content":['
+            b'{"toolUse":{"name":"x","input":{}}}'
+            b"]}}}"
+        )
+
+    reviewer = ProviderReviewer(
+        ProviderBinding(
+            provider="bedrock",
+            transport=Transport.BEDROCK_CONVERSE,
+            model="anthropic.claude-sonnet-5",
+            credential_source="keychain",
+            credential_ref="bedrock:us-west-2",
+            region="us-west-2",
+        ),
+        "secret",
+        RoleRubric("correctness", "review"),
+        opener=opener,
+    )
+    with pytest.raises(InvalidReviewerOutputError, match="malformed Bedrock Converse"):
+        reviewer.review(package(), reviewer.rubric)
+
+
+def test_bedrock_converse_content_rejects_non_dict_content_items() -> None:
+    def opener(_request: object, _timeout: int) -> Response:
+        return Response(b'{"output":{"message":{"content":["not-a-dict"]}}}')
+
+    reviewer = ProviderReviewer(
+        ProviderBinding(
+            provider="bedrock",
+            transport=Transport.BEDROCK_CONVERSE,
+            model="anthropic.claude-sonnet-5",
+            credential_source="keychain",
+            credential_ref="bedrock:us-west-2",
+            region="us-west-2",
+        ),
+        "secret",
+        RoleRubric("correctness", "review"),
+        opener=opener,
+    )
+    with pytest.raises(InvalidReviewerOutputError, match="malformed Bedrock Converse"):
+        reviewer.review(package(), reviewer.rubric)
+
+
+def test_gemini_content_rejects_non_string_text_field() -> None:
+    def opener(_request: object, _timeout: int) -> Response:
+        response = {"candidates": [{"content": {"parts": [{"text": None}]}}]}
+        return Response(json.dumps(response).encode())
+
+    reviewer = ProviderReviewer(
+        binding(Transport.GEMINI), "secret", RoleRubric("correctness", "review"), opener=opener
+    )
+    with pytest.raises(InvalidReviewerOutputError, match="malformed Gemini"):
+        reviewer.review(package(), reviewer.rubric)
 
 
 def test_openai_reasoning_prefix_is_stripped_before_structured_parse() -> None:

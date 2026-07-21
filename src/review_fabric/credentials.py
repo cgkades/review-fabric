@@ -21,15 +21,19 @@ def load_dotenv(path: Path, repository: Path) -> dict[str, str]:
         raise PolicyRejectionError("dotenv file does not exist")
     if stat.S_IMODE(resolved.stat().st_mode) & 0o077:
         raise PolicyRejectionError("dotenv file has unsafe permissions")
-    tracked = (
-        subprocess.run(
-            ("git", "ls-files", "--error-unmatch", str(resolved.relative_to(repository.resolve()))),
-            cwd=repository,
-            capture_output=True,
-        ).returncode
-        == 0
+    relative = str(resolved.relative_to(repository.resolve()))
+    tracked_check = subprocess.run(
+        ("git", "ls-files", "--error-unmatch", "--", relative),
+        cwd=repository,
+        capture_output=True,
     )
-    if tracked:
+    # 0 = tracked, 1 = not tracked (git's documented --error-unmatch exit codes). Any
+    # other exit code (e.g. 129 for a usage error, which a path starting with "-"
+    # could trigger without the "--" separator above) means the check itself failed
+    # and must not be silently treated as "not tracked".
+    if tracked_check.returncode not in (0, 1):
+        raise PolicyRejectionError("could not determine whether dotenv file is tracked by Git")
+    if tracked_check.returncode == 0:
         raise PolicyRejectionError("selected dotenv file is tracked by Git")
     values: dict[str, str] = {}
     for line in resolved.read_text(encoding="utf-8").splitlines():

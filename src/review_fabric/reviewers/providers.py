@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Protocol
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlparse
 from urllib.request import HTTPRedirectHandler, Request, build_opener
@@ -24,18 +23,6 @@ _MAX_TIMEOUT_SECONDS = 3600
 _MAX_RESPONSE_BYTES = 64 * 1024
 
 
-@dataclass(frozen=True)
-class ProviderRequest:
-    endpoint: str | None
-    model: str
-    headers: dict[str, str]
-    transport: str
-
-
-class ProviderClient(Protocol):
-    def invoke(self, request: ProviderRequest, payload: dict[str, object]) -> dict[str, object]: ...
-
-
 UrlOpener = Callable[[Request, int], object]
 
 
@@ -50,27 +37,6 @@ class _RejectRedirect(HTTPRedirectHandler):
 
 def _open_without_redirect(request: Request, timeout: int) -> object:
     return build_opener(_RejectRedirect()).open(request, timeout=timeout)
-
-
-def request_for(binding: ProviderBinding, credential: str | None) -> ProviderRequest:
-    """Build redacted request metadata; the actual credential is invocation-only."""
-    headers = {"authorization": "Bearer [runtime credential]"} if credential else {}
-    if binding.transport is Transport.BEDROCK_IAM:
-        return ProviderRequest(None, binding.model, {}, binding.transport.value)
-    if binding.transport is Transport.OAUTH:
-        raise PolicyRejectionError(
-            "OAuth adapter unavailable; configure an official supported session/helper"
-        )
-    return ProviderRequest(binding.endpoint, binding.model, headers, binding.transport.value)
-
-
-def invoke(
-    client: ProviderClient,
-    binding: ProviderBinding,
-    credential: str | None,
-    payload: dict[str, object],
-) -> dict[str, object]:
-    return client.invoke(request_for(binding, credential), payload)
 
 
 def _validate_outbound_endpoint(endpoint: str, *, allow_local_http: bool) -> None:
@@ -145,6 +111,27 @@ class ProviderReviewer:
         if not 1 <= self.timeout_seconds <= _MAX_TIMEOUT_SECONDS:
             raise ValueError("provider timeout must be within review-plan bounds")
 
+    def _unsupported_transport_error(self) -> PolicyRejectionError:
+        """Give each intentionally-unimplemented Transport member a specific, honest
+        reason instead of a single generic message. configuration.py's
+        ReviewConfiguration.validate_selected_roles already rejects these at config
+        load time; this is a defense-in-depth backstop for any path that reaches
+        invocation without going through that check."""
+        reasons = {
+            Transport.AZURE_AI_FOUNDRY: "Azure AI Foundry transport is not yet implemented",
+            Transport.OPENAI: "native OpenAI transport is not yet implemented",
+            Transport.ANTHROPIC: "native Anthropic transport is not yet implemented",
+            Transport.BEDROCK_IAM: "Bedrock IAM (SigV4) transport is not yet implemented",
+            Transport.OAUTH: (
+                "OAuth adapter unavailable; configure an official supported session/helper"
+            ),
+        }
+        return PolicyRejectionError(
+            reasons.get(
+                self.binding.transport, f"unsupported transport: {self.binding.transport.value}"
+            )
+        )
+
     def review(self, package: ReviewPackage, rubric: RoleRubric) -> tuple[Finding, ...]:
         if self.binding.transport is Transport.GEMINI:
             response = http_post_json(
@@ -183,7 +170,7 @@ class ProviderReviewer:
             )
             content = self._openai_content(response)
         else:
-            raise PolicyRejectionError("unsupported native/OAuth transport")
+            raise self._unsupported_transport_error()
         try:
             parsed = json.loads(self._structured_content(content))
             findings = parsed["findings"]
@@ -252,7 +239,7 @@ class ProviderReviewer:
             )
             content = self._openai_content(response)
         else:
-            raise PolicyRejectionError("unsupported native/OAuth transport")
+            raise self._unsupported_transport_error()
         return self._parse_challenge_response(content, dispute)
 
     @staticmethod
@@ -302,7 +289,16 @@ class ProviderReviewer:
     def _bedrock_converse_content(response: dict[str, object]) -> str:
         try:
             content = response["output"]["message"]["content"]  # type: ignore[index]
-            text = next(item["text"] for item in content if isinstance(item.get("text"), str))  # type: ignore[union-attr]
+            if not isinstance(content, list):
+                raise TypeError("Bedrock Converse content is not a list")
+            text = next(
+                (
+                    item["text"]
+                    for item in content
+                    if isinstance(item, dict) and isinstance(item.get("text"), str)
+                ),
+                None,
+            )
             if not isinstance(text, str):
                 raise TypeError("Bedrock Converse content is not text")
             return text
@@ -450,7 +446,10 @@ class ProviderReviewer:
     @staticmethod
     def _gemini_content(response: dict[str, object]) -> str:
         try:
-            return response["candidates"][0]["content"]["parts"][0]["text"]  # type: ignore[index]
+            text = response["candidates"][0]["content"]["parts"][0]["text"]  # type: ignore[index]
+            if not isinstance(text, str):
+                raise TypeError("Gemini content is not text")
+            return text
         except (KeyError, IndexError, TypeError, ValueError) as error:
             raise InvalidReviewerOutputError(
                 "provider returned malformed Gemini response"

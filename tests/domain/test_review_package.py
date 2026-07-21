@@ -3,7 +3,7 @@ from hashlib import sha256
 import pytest
 from pydantic import ValidationError
 
-from review_fabric.domain.models import CommandResult, FrozenPatchEvidence, ReviewPackage
+from review_fabric.domain.models import FrozenPatchEvidence, ReviewPackage
 from review_fabric.serialization import canonical_json_bytes
 
 
@@ -16,9 +16,6 @@ def make_package(**changes: object) -> ReviewPackage:
         "selected_paths": ("src/service.py",),
         "acceptance_criteria": ("Retry writes are idempotent.",),
         "constraints": ("No schema migration.",),
-        "command_results": (
-            CommandResult(command=("pytest",), exit_code=0, stdout="1 passed", stderr=""),
-        ),
     }
     values.update(changes)
     return ReviewPackage(**values)
@@ -27,10 +24,38 @@ def make_package(**changes: object) -> ReviewPackage:
 def test_review_package_has_deterministic_identifier() -> None:
     package = make_package()
 
-    expected = sha256(canonical_json_bytes(package.model_dump(mode="json"))).hexdigest()
+    expected = sha256(
+        canonical_json_bytes(
+            {
+                "identity_schema_version": 1,
+                "repository_root": package.repository_root,
+                "base_sha": package.base_sha,
+                "head_sha": package.head_sha,
+                "patch_digest": package.patch_digest,
+                "selected_paths": list(package.selected_paths),
+                "acceptance_criteria": list(package.acceptance_criteria),
+                "constraints": list(package.constraints),
+            }
+        )
+    ).hexdigest()
 
     assert package.review_id == expected
     assert make_package().review_id == package.review_id
+
+
+def test_review_package_identity_is_unaffected_by_unrelated_field_additions() -> None:
+    """review_id must not be a hash of the full model dump: adding a field to
+    ReviewPackage in the future (e.g. an optional metadata field with a default)
+    must not silently re-address every existing artifact. patch_evidence is the one
+    field ReviewPackage already carries that is redundant with patch_digest (its
+    digest is validated to always match), so it is a real, present-day case of this:
+    attaching it must not change review_id."""
+    patch = "diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n@@ -0,0 +1 @@\n+value = 1\n"
+    evidence = FrozenPatchEvidence.from_patch(patch)
+    without_patch_evidence = make_package(patch_digest=evidence.digest)
+    with_patch_evidence = make_package(patch_digest=evidence.digest, patch_evidence=evidence)
+
+    assert with_patch_evidence.review_id == without_patch_evidence.review_id
 
 
 def test_review_package_identity_changes_with_review_evidence() -> None:
@@ -53,14 +78,6 @@ def test_review_package_requires_commit_shas_and_patch_digest() -> None:
 
     with pytest.raises(ValidationError):
         make_package(patch_digest="not-a-sha256")
-
-
-def test_command_result_requires_a_command_and_nonnegative_exit_code() -> None:
-    with pytest.raises(ValidationError):
-        CommandResult(command=(), exit_code=0, stdout="", stderr="")
-
-    with pytest.raises(ValidationError):
-        CommandResult(command=("pytest",), exit_code=-1, stdout="", stderr="")
 
 
 def test_frozen_patch_evidence_is_bounded_digest_verified_and_cites_exact_head_lines() -> None:
@@ -90,6 +107,9 @@ def test_frozen_patch_evidence_is_bounded_digest_verified_and_cites_exact_head_l
     )
     assert not evidence.supports_citation(
         {"path": "other.py", "start_line": 2, "end_line": 2, "excerpt": "timeout = 60"}
+    )
+    assert not evidence.supports_citation(
+        {"path": "src/service.py", "start_line": True, "end_line": 1, "excerpt": "context = True"}
     )
 
 

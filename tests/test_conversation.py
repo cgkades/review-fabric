@@ -22,7 +22,6 @@ def package() -> ReviewPackage:
         selected_paths=(),
         acceptance_criteria=(),
         constraints=(),
-        command_results=(),
         patch_evidence=evidence,
     )
 
@@ -207,3 +206,176 @@ def test_partial_first_pass_results_are_persisted_before_escalation(tmp_path) ->
     assert first_pass["payload"]["status"] == "incomplete"
     assert first_pass["payload"]["findings"][0]["title"] == "Coverage"
     assert events[-1]["payload"]["outcome"] == "ESCALATE"
+
+
+def test_challenge_against_a_reviewer_without_challenge_support_is_explicit(tmp_path) -> None:
+    """A structural capability gap must be labeled distinctly, not an incidental AttributeError."""
+    item = Finding(
+        package_id=package().review_id,
+        reviewer_id="correctness",
+        severity=Severity.CONCERN,
+        title="Bug",
+        claim="broken",
+        evidence=(EvidenceCitation(path="src/a.py", start_line=1, end_line=1, excerpt="bad"),),
+        remediation="fix",
+        verification="test",
+        confidence=0.9,
+    )
+    reviewer = FakeReviewer(RoleRubric("correctness", "review"), (item,))
+    assert not hasattr(reviewer, "review_challenge")
+    store = ArtifactStore.create(tmp_path, package(), patch="")
+    plan = ReviewPlan(
+        risk_indicators=(),
+        roles=(ReviewerRole.CORRECTNESS,),
+        max_reviewers=1,
+        challenge_limit=1,
+        retry_limit=0,
+    )
+
+    execute_plan(package(), plan, {"correctness": reviewer}, store)
+
+    events = [
+        json.loads(line) for line in (store.directory / "events.jsonl").read_text().splitlines()
+    ]
+    response = next(event for event in events if event["phase"] == "challenge-response")
+    assert response["payload"] == {"status": "unavailable", "kind": "challenge-unsupported"}
+
+
+def test_low_confidence_material_finding_escalates_instead_of_auto_changing(tmp_path) -> None:
+    """A material finding the reviewer itself is not confident about must force
+    ESCALATE for a human, not silently drive an automatic CHANGE (or be dropped)."""
+    item = Finding(
+        package_id=package().review_id,
+        reviewer_id="correctness",
+        severity=Severity.CONCERN,
+        title="Bug",
+        claim="broken",
+        evidence=(EvidenceCitation(path="src/a.py", start_line=1, end_line=1, excerpt="bad"),),
+        remediation="fix",
+        verification="test",
+        confidence=0.3,
+    )
+    store = ArtifactStore.create(tmp_path, package(), patch="")
+    reviewer = FakeReviewer(RoleRubric("correctness", "review"), (item,))
+    plan = ReviewPlan(
+        risk_indicators=(),
+        roles=(ReviewerRole.CORRECTNESS,),
+        max_reviewers=1,
+        challenge_limit=0,
+        retry_limit=0,
+    )
+
+    execute_plan(package(), plan, {"correctness": reviewer}, store)
+
+    events = [
+        json.loads(line) for line in (store.directory / "events.jsonl").read_text().splitlines()
+    ]
+    assert any(event["phase"] == "low-confidence-findings" for event in events)
+    assert not any(event["phase"] == "normalized-findings" for event in events)
+    assert events[-1]["phase"] == "terminal"
+    assert events[-1]["payload"]["outcome"] == "ESCALATE"
+
+
+def test_confidence_at_or_above_threshold_still_proceeds_to_change(tmp_path) -> None:
+    item = Finding(
+        package_id=package().review_id,
+        reviewer_id="correctness",
+        severity=Severity.CONCERN,
+        title="Bug",
+        claim="broken",
+        evidence=(EvidenceCitation(path="src/a.py", start_line=1, end_line=1, excerpt="bad"),),
+        remediation="fix",
+        verification="test",
+        confidence=0.5,
+    )
+    store = ArtifactStore.create(tmp_path, package(), patch="")
+    reviewer = FakeReviewer(RoleRubric("correctness", "review"), (item,))
+    plan = ReviewPlan(
+        risk_indicators=(),
+        roles=(ReviewerRole.CORRECTNESS,),
+        max_reviewers=1,
+        challenge_limit=0,
+        retry_limit=0,
+    )
+
+    execute_plan(package(), plan, {"correctness": reviewer}, store)
+
+    events = [
+        json.loads(line) for line in (store.directory / "events.jsonl").read_text().splitlines()
+    ]
+    assert events[-1]["payload"]["outcome"] == "CHANGE"
+
+
+def test_overlapping_citations_from_two_reviewers_do_not_force_a_spurious_escalation(
+    tmp_path,
+) -> None:
+    """Two reviewers citing the same defect with citations differing only by an
+    off-by-one boundary must be treated as one confirmable group, not two, so a
+    successful challenge resolves to CHANGE instead of being forced to ESCALATE
+    purely because more than one FindingGroup existed."""
+
+    def citation(start: int, end: int) -> EvidenceCitation:
+        return EvidenceCitation(
+            path="src/a.py",
+            start_line=start,
+            end_line=end,
+            excerpt="\n".join("bad" for _ in range(start, end + 1)),
+        )
+
+    patch = (
+        "diff --git a/src/a.py b/src/a.py\n"
+        "+++ b/src/a.py\n"
+        "@@ -0,0 +1,13 @@\n" + "+bad\n" * 13
+    )
+    evidence = FrozenPatchEvidence.from_patch(patch)
+    review_package = package().model_copy(
+        update={"patch_digest": evidence.digest, "patch_evidence": evidence}
+    )
+
+    first = Finding(
+        package_id=review_package.review_id,
+        reviewer_id="correctness",
+        severity=Severity.CONCERN,
+        title="Bug",
+        claim="broken",
+        evidence=(citation(10, 12),),
+        remediation="fix",
+        verification="test",
+        confidence=0.9,
+    )
+    second = first.model_copy(update={"reviewer_id": "testing", "evidence": (citation(10, 13),)})
+
+    class ConfirmingReviewer(FakeReviewer):
+        def review_challenge(self, dispute: object) -> dict[str, object]:
+            return {
+                "disposition": "confirm",
+                "evidence": [citation.model_dump() for citation in dispute.citations],
+            }
+
+    correctness_reviewer = ConfirmingReviewer(RoleRubric("correctness", "review"), (first,))
+    testing_reviewer = FakeReviewer(RoleRubric("testing", "review"), (second,))
+    store = ArtifactStore.create(tmp_path, review_package, patch=patch)
+    plan = ReviewPlan(
+        risk_indicators=(),
+        roles=(ReviewerRole.CORRECTNESS, ReviewerRole.TESTING),
+        max_reviewers=2,
+        challenge_limit=1,
+        retry_limit=0,
+    )
+
+    execute_plan(
+        review_package,
+        plan,
+        {"correctness": correctness_reviewer, "testing": testing_reviewer},
+        store,
+    )
+
+    events = [
+        json.loads(line) for line in (store.directory / "events.jsonl").read_text().splitlines()
+    ]
+    normalized = next(event for event in events if event["phase"] == "normalized-findings")
+    assert len(normalized["payload"]["groups"]) == 1
+    assert normalized["payload"]["groups"][0]["finding_count"] == 2
+    assert sum(event["phase"] == "challenge" for event in events) == 1
+    assert events[-1]["phase"] == "terminal"
+    assert events[-1]["payload"]["outcome"] == "CHANGE"

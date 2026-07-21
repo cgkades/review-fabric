@@ -140,3 +140,18 @@ def test_collect_git_evidence_allows_removing_a_preexisting_secret(repository: P
     assert "config.env" in evidence.changed_paths
     assert "sk-proj-" not in evidence.patch
     assert "[REDACTED]" in evidence.patch
+
+
+def test_run_git_raises_on_timeout_instead_of_hanging_indefinitely(
+    repository: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import review_fabric.evidence.git as git_module
+    from review_fabric.evidence.git import _run_git
+
+    def fake_run(*_args: object, **_kwargs: object) -> None:
+        raise subprocess.TimeoutExpired(cmd="git", timeout=30)
+
+    monkeypatch.setattr(git_module.subprocess, "run", fake_run)
+
+    with pytest.raises(InvalidReviewPackageError, match="timed out"):
+        _run_git(repository, "status")

@@ -310,7 +310,7 @@ def test_cli_rejects_invalid_range_without_creating_artifact(tmp_path: Path) -> 
 
 
 def test_missing_credential_persists_redacted_terminal_artifact(
-    tmp_path: Path, monkeypatch
+    tmp_path: Path, monkeypatch, caplog
 ) -> None:
     repository = tmp_path / "fixture"
     repository.mkdir()
@@ -346,6 +346,8 @@ def test_missing_credential_persists_redacted_terminal_artifact(
     assert "MISSING_REVIEW_KEY" not in events
     assert json.loads(events.splitlines()[-1])["payload"]["outcome"] == "ESCALATE"
     assert run(repository, base, head, configuration=configuration) == artifact
+    assert "reviewer setup failed" in caplog.text
+    assert "MISSING_REVIEW_KEY" not in caplog.text
 
 
 def test_existing_nonterminal_artifact_is_closed_with_same_identity(tmp_path: Path) -> None:

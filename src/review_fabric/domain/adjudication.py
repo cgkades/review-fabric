@@ -26,8 +26,8 @@ class ChallengeCitation(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
     path: str = Field(min_length=1, max_length=512)
-    start_line: int = Field(ge=1)
-    end_line: int = Field(ge=1)
+    start_line: int = Field(ge=1, strict=True)
+    end_line: int = Field(ge=1, strict=True)
     excerpt: str = Field(min_length=1, max_length=1024)
 
     @model_validator(mode="after")
@@ -70,7 +70,7 @@ class ChallengeResponse(BaseModel):
 
 
 class Decision(BaseModel):
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
     outcome: DecisionOutcome
     group_id: str
     accepted_evidence: tuple[ChallengeCitation, ...] = ()

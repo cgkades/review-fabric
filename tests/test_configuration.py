@@ -152,3 +152,19 @@ def test_configuration_rejects_selected_unsupported_transport(transport: Transpo
 
     with pytest.raises(ValueError, match="unsupported"):
         configuration.validate_selected_roles(("correctness",))
+
+
+@pytest.mark.parametrize("credential_source", ["aws-chain", "workload"])
+def test_bedrock_converse_rejects_the_aws_credential_chain(credential_source: str) -> None:
+    """Only bedrock-iam implements the AWS chain; bedrock-converse needs a bearer
+    credential and must not silently validate a combination that always fails at
+    invocation time with a confusing "credential unavailable" message."""
+    with pytest.raises(ValidationError, match="does not support the .* credential chain"):
+        ProviderBinding(
+            provider="bedrock",
+            transport=Transport.BEDROCK_CONVERSE,
+            model="anthropic.claude-sonnet-5",
+            credential_source=credential_source,
+            credential_ref="bedrock:us-west-2",
+            region="us-west-2",
+        )

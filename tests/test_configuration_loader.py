@@ -7,6 +7,7 @@ import pytest
 
 from review_fabric.cli import main
 from review_fabric.configuration import ProviderBinding, Transport, load_configuration
+from review_fabric.errors import InvalidConfigurationError, ReviewFabricError
 
 
 def test_load_configuration_from_json_file_without_resolving_credential(tmp_path: Path) -> None:
@@ -109,3 +110,26 @@ def test_cli_redacts_rejected_configuration_values(
 
     assert main(["--config", str(config), str(tmp_path), "base", "head"]) == 2
     assert sentinel not in capsys.readouterr().out
+
+
+def test_load_configuration_raises_a_review_fabric_error_for_malformed_json(
+    tmp_path: Path,
+) -> None:
+    """A module-boundary error must be a ReviewFabricError subclass, not a bare
+    ValueError, so callers can rely on one common exception hierarchy."""
+    path = tmp_path / "review-fabric.json"
+    path.write_text("{not valid json")
+
+    with pytest.raises(InvalidConfigurationError):
+        load_configuration(path)
+    assert issubclass(InvalidConfigurationError, ReviewFabricError)
+
+
+def test_load_configuration_raises_a_review_fabric_error_for_invalid_schema(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "review-fabric.json"
+    path.write_text(json.dumps({"version": 1, "bindings": {}, "roles": {"correctness": "missing"}}))
+
+    with pytest.raises(InvalidConfigurationError):
+        load_configuration(path)

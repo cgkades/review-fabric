@@ -1,4 +1,4 @@
-"""Immutable domain models for review inputs and captured command evidence."""
+"""Immutable domain models for review inputs and frozen patch evidence."""
 
 from __future__ import annotations
 
@@ -12,17 +12,7 @@ from review_fabric.serialization import canonical_json_bytes
 
 _MAX_PATCH_EVIDENCE_BYTES = 48 * 1024
 _HUNK_HEADER = re.compile(r"^@@ -(?P<old>\d+)(?:,\d+)? \+(?P<new>\d+)(?:,\d+)? @@")
-
-
-class CommandResult(BaseModel):
-    """Captured result of a command run while constructing a review package."""
-
-    model_config = ConfigDict(frozen=True)
-
-    command: tuple[str, ...] = Field(min_length=1)
-    exit_code: int = Field(ge=0)
-    stdout: str
-    stderr: str
+_REVIEW_IDENTITY_SCHEMA_VERSION = 1
 
 
 class FrozenPatchEvidence(BaseModel):
@@ -55,7 +45,9 @@ class FrozenPatchEvidence(BaseModel):
         if not (
             isinstance(path, str)
             and isinstance(start_line, int)
+            and not isinstance(start_line, bool)
             and isinstance(end_line, int)
+            and not isinstance(end_line, bool)
             and isinstance(excerpt, str)
             and start_line >= 1
             and end_line >= start_line
@@ -107,7 +99,6 @@ class ReviewPackage(BaseModel):
     selected_paths: tuple[str, ...]
     acceptance_criteria: tuple[str, ...]
     constraints: tuple[str, ...]
-    command_results: tuple[CommandResult, ...]
     patch_evidence: FrozenPatchEvidence | None = None
 
     @model_validator(mode="after")
@@ -118,6 +109,26 @@ class ReviewPackage(BaseModel):
 
     @property
     def review_id(self) -> str:
-        """Return a stable identifier for this exact immutable review input."""
-        payload = canonical_json_bytes(self.model_dump(mode="json"))
+        """Return a stable identifier for this exact immutable review input.
+
+        Computed from an explicit, versioned projection of fields — not a full model
+        dump — so adding an unrelated field to ReviewPackage in the future does not
+        silently change review_id (and therefore the artifact directory) for
+        otherwise-identical review inputs. patch_evidence is intentionally excluded:
+        its digest is validated to always equal patch_digest, so it carries no
+        additional identity information. Deliberately changing which fields
+        participate in identity must bump _REVIEW_IDENTITY_SCHEMA_VERSION.
+        """
+        payload = canonical_json_bytes(
+            {
+                "identity_schema_version": _REVIEW_IDENTITY_SCHEMA_VERSION,
+                "repository_root": self.repository_root,
+                "base_sha": self.base_sha,
+                "head_sha": self.head_sha,
+                "patch_digest": self.patch_digest,
+                "selected_paths": list(self.selected_paths),
+                "acceptance_criteria": list(self.acceptance_criteria),
+                "constraints": list(self.constraints),
+            }
+        )
         return sha256(payload).hexdigest()

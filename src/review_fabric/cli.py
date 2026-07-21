@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import sys
 from pathlib import Path
+from typing import NoReturn
 
 from review_fabric.configuration import ReviewConfiguration, Transport, load_configuration
 from review_fabric.credentials import auth_remove, auth_set, auth_status, resolve_credential
@@ -18,11 +20,22 @@ from review_fabric.orchestration import execute_plan
 from review_fabric.reviewers.base import FakeReviewer, RoleRubric
 from review_fabric.reviewers.providers import ProviderReviewer
 
+logger = logging.getLogger(__name__)
+
+
+class _ArgumentParser(argparse.ArgumentParser):
+    """Route argparse usage errors through the same ReviewFabricError path as every
+    other expected failure, so main()'s uniform "review-fabric: <message>" prefix
+    (and a log scraper grepping for it) never misses a usage error, instead of
+    argparse printing its own differently-formatted usage/error block and calling
+    sys.exit directly."""
+
+    def error(self, message: str) -> NoReturn:
+        raise ReviewFabricError(message)
+
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        prog="review-fabric", description="Create a local evidence review"
-    )
+    parser = _ArgumentParser(prog="review-fabric", description="Create a local evidence review")
     parser.add_argument("repository", type=Path, nargs="?", help="local Git repository to inspect")
     parser.add_argument("base", nargs="?", help="explicit base Git revision")
     parser.add_argument("head", nargs="?", help="explicit head Git revision")
@@ -44,7 +57,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _auth_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="review-fabric auth")
+    parser = _ArgumentParser(prog="review-fabric auth")
     parser.add_argument("action", choices=("set", "status", "remove"))
     parser.add_argument("provider")
     parser.add_argument("--profile", default="default")
@@ -88,7 +101,6 @@ def run(
             *(f"risk:{risk.value}" for risk in sorted(set(declared_risks), key=str)),
             *(() if configuration is None else (f"configuration:{configuration.identity}",)),
         ),
-        command_results=(),
         patch_evidence=FrozenPatchEvidence.from_patch(evidence.patch),
     )
     root = Path(evidence.repository_root)
@@ -114,6 +126,9 @@ def run(
             store.record_event(
                 "terminal", {"outcome": "ESCALATE", "reason": "prior run incomplete"}
             )
+            logger.warning(
+                "review-fabric: closing incomplete prior run for review_id=%s", package.review_id
+            )
             return store.directory
         store.record_event("package", {"selected_paths": list(package.selected_paths)})
         plan = ReviewPolicy.default().select_plan(package.selected_paths, declared=declared_risks)
@@ -134,12 +149,16 @@ def run(
                         reviewers[role.value] = ProviderReviewer(
                             binding, credential, rubric, timeout_seconds=plan.timeout_seconds
                         )
-        except (ReviewFabricError, OSError, ValueError):
+        except (ReviewFabricError, OSError, ValueError) as error:
             # Credential/configuration exception text may contain a path or provider
-            # detail; artifacts persist a stable category only.
+            # detail; artifacts persist a stable category only. The class name alone
+            # (never the message) is safe to log for operator triage.
             store.record_event("execution-error", {"kind": "credential-unavailable"})
             store.record_event(
                 "terminal", {"outcome": "ESCALATE", "reason": "reviewer setup failed"}
+            )
+            logger.warning(
+                "review-fabric: reviewer setup failed (caused by %s)", type(error).__name__
             )
             return store.directory
         # No configured adapter is silently replaced with an ACCEPTing fake reviewer.
@@ -170,7 +189,7 @@ def _run_auth(arguments: list[str]) -> int:
 
 
 def main(arguments: list[str] | None = None) -> int:
-    arguments = arguments or sys.argv[1:]
+    arguments = sys.argv[1:] if arguments is None else arguments
     try:
         if arguments and arguments[0] == "summary":
             if len(arguments) != 2:
@@ -197,8 +216,20 @@ def main(arguments: list[str] | None = None) -> int:
         )
         return 0
     except (ReviewFabricError, OSError, ValueError) as error:
-        print(f"review-fabric: {error}", flush=True)
+        print(f"review-fabric: {error}{_cause_suffix(error)}", flush=True)
+        logger.error("review-fabric: %s%s", error, _cause_suffix(error))
         return 2
+
+
+def _cause_suffix(error: BaseException) -> str:
+    """Name (never the message of) a chained cause, to aid triage without leaking
+    detail: distinguishing e.g. "caused by ImportError" (a package is not installed)
+    from "caused by RuntimeError" (a backend is unavailable) is useful for an operator
+    without ever printing the underlying exception's own text, which the codebase
+    otherwise deliberately keeps generic/static specifically to avoid leaking secret
+    material or provider detail (see errors.ReviewFabricError.to_record)."""
+    cause = error.__cause__
+    return f" (caused by {type(cause).__name__})" if cause is not None else ""
 
 
 if __name__ == "__main__":

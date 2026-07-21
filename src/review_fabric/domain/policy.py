@@ -39,6 +39,19 @@ class ReviewPlan(BaseModel):
     retry_limit: int = Field(ge=0, le=3)
     timeout_seconds: int = Field(default=60, ge=1, le=3600)
     missing_reviewer_behavior: MissingReviewerBehavior = MissingReviewerBehavior.ESCALATE
+    minimum_confidence: float = Field(
+        default=0.5,
+        ge=0,
+        le=1,
+        description=(
+            "A material (BLOCKER/CONCERN) finding below this reviewer-reported "
+            "confidence forces ESCALATE for human review instead of automatically "
+            "driving CHANGE. Reviewer confidence scores are not reliably calibrated, "
+            "so this is a moderate 'more likely than not' bar, not a high-precision "
+            "filter — it deliberately never silently drops a low-confidence finding, "
+            "only defers its disposition to a human."
+        ),
+    )
 
     @model_validator(mode="after")
     def validate_reviewers(self) -> ReviewPlan:
@@ -55,6 +68,7 @@ class ReviewPolicy(BaseModel):
     retry_limit: int = Field(default=1, ge=0, le=3)
     timeout_seconds: int = Field(default=60, ge=1, le=3600)
     missing_reviewer_behavior: MissingReviewerBehavior = MissingReviewerBehavior.ESCALATE
+    minimum_confidence: float = Field(default=0.5, ge=0, le=1)
 
     @classmethod
     def default(cls) -> ReviewPolicy:
@@ -116,4 +130,5 @@ class ReviewPolicy(BaseModel):
             retry_limit=self.retry_limit,
             timeout_seconds=self.timeout_seconds,
             missing_reviewer_behavior=self.missing_reviewer_behavior,
+            minimum_confidence=self.minimum_confidence,
         )

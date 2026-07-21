@@ -29,7 +29,6 @@ def package() -> ReviewPackage:
         selected_paths=("src/example.py",),
         acceptance_criteria=("review fixture",),
         constraints=("read-only",),
-        command_results=(),
         patch_evidence=evidence,
     )
 
@@ -135,3 +134,15 @@ def test_unresolved_architectural_fixture_escalates(tmp_path: Path) -> None:
     events = run_fixture(tmp_path, {})
 
     assert events[-1]["payload"]["outcome"] == "ESCALATE"
+
+
+def test_unresolved_architectural_fixture_logs_a_warning_for_escalation(
+    tmp_path: Path, caplog
+) -> None:
+    """Operators must see a log signal for ESCALATE without needing to open artifacts."""
+    import logging
+
+    with caplog.at_level(logging.WARNING, logger="review_fabric.orchestration"):
+        run_fixture(tmp_path, {})
+
+    assert "outcome=ESCALATE" in caplog.text

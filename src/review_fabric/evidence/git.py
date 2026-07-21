@@ -53,23 +53,30 @@ def _safe_git_environment() -> dict[str, str]:
     return environment
 
 
+_GIT_TIMEOUT_SECONDS = 30
+
+
 def _run_git(repository: Path, *arguments: str) -> str:
-    completed = subprocess.run(
-        (
-            "git",
-            "-c",
-            "color.ui=false",
-            "-c",
-            "core.pager=cat",
-            "-c",
-            "diff.external=",
-            *arguments,
-        ),
-        cwd=repository,
-        capture_output=True,
-        check=False,
-        env=_safe_git_environment(),
-    )
+    try:
+        completed = subprocess.run(
+            (
+                "git",
+                "-c",
+                "color.ui=false",
+                "-c",
+                "core.pager=cat",
+                "-c",
+                "diff.external=",
+                *arguments,
+            ),
+            cwd=repository,
+            capture_output=True,
+            check=False,
+            env=_safe_git_environment(),
+            timeout=_GIT_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise InvalidReviewPackageError("Git command timed out") from error
     if completed.returncode:
         message = completed.stderr.decode("utf-8", errors="replace").strip()
         raise InvalidReviewPackageError(message or "Git command failed")
