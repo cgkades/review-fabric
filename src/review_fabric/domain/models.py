@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from hashlib import sha256
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -23,6 +23,7 @@ DEFAULT_MAX_PATCH_EVIDENCE_BYTES = 48 * 1024
 _ABSOLUTE_MAX_PATCH_EVIDENCE_BYTES = 64 * 1024 * 1024
 _HUNK_HEADER = re.compile(r"^@@ -(?P<old>\d+)(?:,\d+)? \+(?P<new>\d+)(?:,\d+)? @@")
 _REVIEW_IDENTITY_SCHEMA_VERSION = 1
+_MAX_CITATION_SPAN = 400
 
 
 class FrozenPatchEvidence(BaseModel):
@@ -79,32 +80,83 @@ class FrozenPatchEvidence(BaseModel):
             return False
         return excerpt == "\n".join(line for line in expected if line is not None)
 
+    def lookup(self, path: str, start_line: int, end_line: int) -> dict[str, object]:
+        """Return the authoritative citation for a contiguous head-side line range,
+        or a structured {"error": ...} payload. This is the source of truth behind
+        a reviewer's cite-tool call, so a citation it copies from the result is
+        correct by construction rather than retyped from memory."""
+        if start_line < 1 or end_line < start_line:
+            return {"error": "start_line must be >= 1 and end_line must be >= start_line"}
+        if end_line - start_line + 1 > _MAX_CITATION_SPAN:
+            return {"error": f"cite at most {_MAX_CITATION_SPAN} lines per call"}
+        lines = self._head_lines().get(path, {})
+        expected = [lines.get(line) for line in range(start_line, end_line + 1)]
+        if any(line is None for line in expected):
+            return {
+                "error": (
+                    "no such head-side line range in PATCH_EVIDENCE for that path "
+                    "(path not selected, out of range, or a deleted line)"
+                )
+            }
+        return {
+            "path": path,
+            "start_line": start_line,
+            "end_line": end_line,
+            "excerpt": "\n".join(line for line in expected if line is not None),
+        }
+
+    def numbered_patch(self) -> str:
+        """Render the patch with each retained (added or context) line prefixed by
+        its exact head-side line number right after the diff marker, e.g.
+        '+42:    return x'. A reviewer can then copy a verified number straight into
+        a citation instead of deriving it by counting through hunk headers itself —
+        the arithmetic a smaller model is prone to getting off by one or two on.
+        Deleted lines and structural lines (file/hunk headers) are left unchanged;
+        this is a display-only rendering never stored as evidence."""
+        return "\n".join(
+            raw_line if line_number is None else f"{raw_line[0]}{line_number}:{raw_line[1:]}"
+            for raw_line, _path, line_number in self._iter_patch_lines()
+        )
+
     def _head_lines(self) -> dict[str, dict[int, str]]:
         files: dict[str, dict[int, str]] = {}
+        for raw_line, path, line_number in self._iter_patch_lines():
+            if path is not None and line_number is not None:
+                files.setdefault(path, {})[line_number] = raw_line[1:]
+        return files
+
+    def _iter_patch_lines(self) -> Iterator[tuple[str, str | None, int | None]]:
+        """Yield (raw_line, current path, head-side line number) for every physical
+        patch line. line_number is None for lines with no head-side line number:
+        deletions, hunk/file headers, and no-newline markers."""
         path: str | None = None
         next_line: int | None = None
         for raw_line in self.patch.splitlines():
             if raw_line.startswith("+++ "):
                 candidate = raw_line[4:]
                 path = None if candidate == "/dev/null" else candidate.removeprefix("b/")
+                yield raw_line, path, None
                 continue
             match = _HUNK_HEADER.match(raw_line)
             if match:
                 next_line = int(match.group("new"))
+                yield raw_line, path, None
                 continue
             if path is None or next_line is None or not raw_line:
+                yield raw_line, path, None
                 continue
-            marker, text = raw_line[0], raw_line[1:]
+            marker = raw_line[0]
             if marker in {"+", " "}:
-                files.setdefault(path, {})[next_line] = text
+                line_number = next_line
                 next_line += 1
+                yield raw_line, path, line_number
             elif marker == "-":
-                continue
+                yield raw_line, path, None
             elif marker == "\\":
-                continue
+                yield raw_line, path, None
             else:
                 next_line = None
-        return files
+                yield raw_line, path, None
 
 
 class ReviewPackage(BaseModel):
