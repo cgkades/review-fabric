@@ -107,6 +107,7 @@ def test_gemini_request_is_bounded_and_parses_strict_findings() -> None:
     payload = json.loads(seen["data"])
     assert "untrusted data" in payload["systemInstruction"]["parts"][0]["text"].lower()
     assert "bad = True" in payload["contents"][0]["parts"][0]["text"]
+    assert "+1:bad = True" in payload["contents"][0]["parts"][0]["text"]
     assert findings[0].package_id == package().review_id
 
 

@@ -344,7 +344,16 @@ class ProviderReviewer:
             "Review only the supplied frozen PATCH_EVIDENCE. Do not assume repository, "
             "filesystem, network, or tool access. For every citation, reproduce exactly "
             "contiguous head-side patch lines using its path, start_line, end_line, and excerpt. "
-            "Do not cite deleted lines or content outside PATCH_EVIDENCE.\n"
+            "Do not cite deleted lines or content outside PATCH_EVIDENCE. Every retained line in "
+            "PATCH_EVIDENCE.patch is prefixed with its exact head-side line number right after "
+            "the diff marker, formatted as '<marker><line_number>:<original text>' (e.g. "
+            "'+42:    return x'); copy that exact number as start_line/end_line and set excerpt "
+            "to the original text only, without the marker or the line-number prefix. Lines "
+            "starting with '-' are deletions with no head-side line number; never cite them. "
+            "A multi-line excerpt joins its lines with a single newline character each; it has "
+            "no leading or trailing newline. Preserve each line's exact original leading "
+            "whitespace/indentation verbatim; never dedent, reformat, or otherwise clean up the "
+            "quoted text.\n"
             + output_contract
         )
 
@@ -362,7 +371,7 @@ class ProviderReviewer:
             "selected_paths": package.selected_paths,
             "acceptance_criteria": package.acceptance_criteria,
             "constraints": package.constraints,
-            "patch": evidence.patch,
+            "patch": evidence.numbered_patch(),
         }
         return "Untrusted PATCH_EVIDENCE data follows.\n" + json.dumps(
             input_dto, separators=(",", ":")
