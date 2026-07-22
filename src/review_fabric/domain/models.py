@@ -23,6 +23,7 @@ DEFAULT_MAX_PATCH_EVIDENCE_BYTES = 48 * 1024
 _ABSOLUTE_MAX_PATCH_EVIDENCE_BYTES = 64 * 1024 * 1024
 _HUNK_HEADER = re.compile(r"^@@ -(?P<old>\d+)(?:,\d+)? \+(?P<new>\d+)(?:,\d+)? @@")
 _REVIEW_IDENTITY_SCHEMA_VERSION = 1
+_MAX_CITATION_SPAN = 400
 
 
 class FrozenPatchEvidence(BaseModel):
@@ -78,6 +79,31 @@ class FrozenPatchEvidence(BaseModel):
         if any(line is None for line in expected):
             return False
         return excerpt == "\n".join(line for line in expected if line is not None)
+
+    def lookup(self, path: str, start_line: int, end_line: int) -> dict[str, object]:
+        """Return the authoritative citation for a contiguous head-side line range,
+        or a structured {"error": ...} payload. This is the source of truth behind
+        a reviewer's cite-tool call, so a citation it copies from the result is
+        correct by construction rather than retyped from memory."""
+        if start_line < 1 or end_line < start_line:
+            return {"error": "start_line must be >= 1 and end_line must be >= start_line"}
+        if end_line - start_line + 1 > _MAX_CITATION_SPAN:
+            return {"error": f"cite at most {_MAX_CITATION_SPAN} lines per call"}
+        lines = self._head_lines().get(path, {})
+        expected = [lines.get(line) for line in range(start_line, end_line + 1)]
+        if any(line is None for line in expected):
+            return {
+                "error": (
+                    "no such head-side line range in PATCH_EVIDENCE for that path "
+                    "(path not selected, out of range, or a deleted line)"
+                )
+            }
+        return {
+            "path": path,
+            "start_line": start_line,
+            "end_line": end_line,
+            "excerpt": "\n".join(line for line in expected if line is not None),
+        }
 
     def numbered_patch(self) -> str:
         """Render the patch with each retained (added or context) line prefixed by

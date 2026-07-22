@@ -13,7 +13,7 @@ from review_fabric.domain.adjudication import Dispute
 from review_fabric.domain.models import FrozenPatchEvidence, ReviewPackage
 from review_fabric.errors import InvalidReviewerOutputError, PolicyRejectionError
 from review_fabric.reviewers.base import RoleRubric
-from review_fabric.reviewers.providers import ProviderReviewer, http_post_json
+from review_fabric.reviewers.providers import _MAX_TOOL_TURNS, ProviderReviewer, http_post_json
 
 
 def package() -> ReviewPackage:
@@ -103,8 +103,9 @@ def test_gemini_request_is_bounded_and_parses_strict_findings() -> None:
     findings = reviewer.review(package(), reviewer.rubric)
     assert seen["url"].endswith("/v1beta/models/light-model:generateContent")
     assert seen["timeout"] == 60
-    assert b"response_mime_type" in seen["data"]
+    assert b"response_mime_type" not in seen["data"]  # incompatible with function calling
     payload = json.loads(seen["data"])
+    assert payload["tools"][0]["functionDeclarations"][0]["name"] == "cite_patch_lines"
     assert "untrusted data" in payload["systemInstruction"]["parts"][0]["text"].lower()
     assert "bad = True" in payload["contents"][0]["parts"][0]["text"]
     assert "+1:bad = True" in payload["contents"][0]["parts"][0]["text"]
@@ -392,6 +393,27 @@ def test_openai_reasoning_prefix_is_stripped_before_structured_parse() -> None:
     assert reviewer.review(package(), reviewer.rubric) == ()
 
 
+def test_structured_content_extracts_a_json_fence_after_narrative_commentary() -> None:
+    """Observed live: after a multi-turn tool-use conversation, a model's final
+    turn sometimes wraps up with prose before the fenced JSON instead of emitting
+    only raw JSON. The payload must still be extracted; validation stays just as
+    strict once it's found."""
+    content = (
+        "All the citations check out and the change looks correct.\n\n"
+        '```json\n{"findings":[]}\n```'
+    )
+
+    reviewer = ProviderReviewer(
+        binding(Transport.OPENAI_COMPATIBLE),
+        "secret",
+        RoleRubric("correctness", "review"),
+        opener=lambda *_: Response(
+            json.dumps({"choices": [{"message": {"content": content}}]}).encode()
+        ),
+    )
+    assert reviewer.review(package(), reviewer.rubric) == ()
+
+
 def test_openai_content_repairs_gpt_oss_nested_opening_brace_before_json_parse() -> None:
     response = (
         b'{"choices":[{"message":{"content":"<reasoning>internal</reasoning>'
@@ -588,3 +610,248 @@ def test_bedrock_converse_challenge_uses_bounded_dispute_and_fenced_json() -> No
                 citations=({"path": "src/a.py", "start_line": 1, "end_line": 1, "excerpt": "bad"},),
             ),
         )
+
+
+def _bedrock_tool_use_response(call_index: int) -> Response:
+    return Response(
+        json.dumps(
+            {
+                "output": {
+                    "message": {
+                        "content": [
+                            {
+                                "toolUse": {
+                                    "toolUseId": f"t{call_index}",
+                                    "name": "cite_patch_lines",
+                                    "input": {
+                                        "path": "src/a.py",
+                                        "start_line": 1,
+                                        "end_line": 1,
+                                    },
+                                }
+                            }
+                        ]
+                    }
+                },
+                "stopReason": "tool_use",
+            }
+        ).encode()
+    )
+
+
+def test_bedrock_converse_tool_round_trip_uses_authoritative_excerpt() -> None:
+    calls: list[dict[str, object]] = []
+
+    def opener(request: object, timeout: int) -> Response:
+        body = json.loads(request.data)  # type: ignore[attr-defined]
+        calls.append(body)
+        if len(calls) == 1:
+            assert body["toolConfig"]["tools"][0]["toolSpec"]["name"] == "cite_patch_lines"
+            return _bedrock_tool_use_response(1)
+        findings = {
+            "findings": [
+                {
+                    "severity": "concern",
+                    "title": "Bad flag",
+                    "claim": "bad = True is dangerous",
+                    "evidence": [
+                        {
+                            "path": "src/a.py",
+                            "start_line": 1,
+                            "end_line": 1,
+                            "excerpt": "bad = True",
+                        }
+                    ],
+                    "remediation": "Set to False",
+                    "verification": "Read the code",
+                    "confidence": 0.9,
+                }
+            ]
+        }
+        return Response(
+            json.dumps(
+                {
+                    "output": {"message": {"content": [{"text": json.dumps(findings)}]}},
+                    "stopReason": "end_turn",
+                }
+            ).encode()
+        )
+
+    reviewer = ProviderReviewer(
+        ProviderBinding(
+            provider="bedrock",
+            transport=Transport.BEDROCK_CONVERSE,
+            model="anthropic.claude-sonnet-5",
+            credential_source="keychain",
+            credential_ref="bedrock:us-west-2",
+            region="us-west-2",
+        ),
+        "secret",
+        RoleRubric("correctness", "review"),
+        opener=opener,
+    )
+    findings = reviewer.review(package(), reviewer.rubric)
+
+    assert len(calls) == 2
+    assert findings[0].evidence[0].excerpt == "bad = True"
+    tool_result = calls[1]["messages"][2]["content"][0]["toolResult"]  # type: ignore[index]
+    assert tool_result["toolUseId"] == "t1"  # type: ignore[index]
+    assert tool_result["content"][0]["json"]["excerpt"] == "bad = True"  # type: ignore[index]
+
+
+def test_bedrock_converse_tool_loop_is_bounded_and_never_infinite() -> None:
+    calls = {"n": 0}
+
+    def opener(request: object, timeout: int) -> Response:
+        calls["n"] += 1
+        return _bedrock_tool_use_response(calls["n"])
+
+    reviewer = ProviderReviewer(
+        ProviderBinding(
+            provider="bedrock",
+            transport=Transport.BEDROCK_CONVERSE,
+            model="anthropic.claude-sonnet-5",
+            credential_source="keychain",
+            credential_ref="bedrock:us-west-2",
+            region="us-west-2",
+        ),
+        "secret",
+        RoleRubric("correctness", "review"),
+        opener=opener,
+    )
+
+    with pytest.raises(InvalidReviewerOutputError, match="turn limit"):
+        reviewer.review(package(), reviewer.rubric)
+    assert calls["n"] == _MAX_TOOL_TURNS
+
+
+def test_gemini_tool_round_trip_uses_authoritative_excerpt() -> None:
+    calls: list[dict[str, object]] = []
+
+    def opener(request: object, timeout: int) -> Response:
+        body = json.loads(request.data)  # type: ignore[attr-defined]
+        calls.append(body)
+        if len(calls) == 1:
+            assert body["tools"][0]["functionDeclarations"][0]["name"] == "cite_patch_lines"
+            return Response(
+                json.dumps(
+                    {
+                        "candidates": [
+                            {
+                                "content": {
+                                    "parts": [
+                                        {
+                                            "functionCall": {
+                                                "name": "cite_patch_lines",
+                                                "args": {
+                                                    "path": "src/a.py",
+                                                    "start_line": 1,
+                                                    "end_line": 1,
+                                                },
+                                            }
+                                        }
+                                    ]
+                                }
+                            }
+                        ]
+                    }
+                ).encode()
+            )
+        return Response(
+            json.dumps(
+                {"candidates": [{"content": {"parts": [{"text": json.dumps({"findings": []})}]}}]}
+            ).encode()
+        )
+
+    reviewer = ProviderReviewer(
+        binding(), "secret", RoleRubric("correctness", "review"), opener=opener
+    )
+
+    assert reviewer.review(package(), reviewer.rubric) == ()
+    assert len(calls) == 2
+    last_content = calls[1]["contents"][-1]  # type: ignore[index]
+    function_response = last_content["parts"][0]["functionResponse"]  # type: ignore[index]
+    assert function_response["response"]["excerpt"] == "bad = True"  # type: ignore[index]
+
+
+def test_openai_tool_round_trip_uses_authoritative_excerpt() -> None:
+    calls: list[dict[str, object]] = []
+
+    def opener(request: object, timeout: int) -> Response:
+        body = json.loads(request.data)  # type: ignore[attr-defined]
+        calls.append(body)
+        if len(calls) == 1:
+            assert body["tools"][0]["function"]["name"] == "cite_patch_lines"
+            return Response(
+                json.dumps(
+                    {
+                        "choices": [
+                            {
+                                "message": {
+                                    "role": "assistant",
+                                    "content": None,
+                                    "tool_calls": [
+                                        {
+                                            "id": "call_1",
+                                            "type": "function",
+                                            "function": {
+                                                "name": "cite_patch_lines",
+                                                "arguments": json.dumps(
+                                                    {
+                                                        "path": "src/a.py",
+                                                        "start_line": 1,
+                                                        "end_line": 1,
+                                                    }
+                                                ),
+                                            },
+                                        }
+                                    ],
+                                }
+                            }
+                        ]
+                    }
+                ).encode()
+            )
+        return Response(b'{"choices":[{"message":{"content":"{\\"findings\\":[]}"}}]}')
+
+    reviewer = ProviderReviewer(
+        binding(Transport.OPENAI_COMPATIBLE),
+        "secret",
+        RoleRubric("correctness", "review"),
+        opener=opener,
+    )
+
+    assert reviewer.review(package(), reviewer.rubric) == ()
+    assert len(calls) == 2
+    tool_message = calls[1]["messages"][-1]  # type: ignore[index]
+    assert tool_message["role"] == "tool"  # type: ignore[index]
+    assert tool_message["tool_call_id"] == "call_1"  # type: ignore[index]
+    assert json.loads(tool_message["content"])["excerpt"] == "bad = True"  # type: ignore[index]
+
+
+def test_execute_cite_tool_handles_malformed_arguments_without_raising() -> None:
+    pkg = package()
+
+    assert "error" in ProviderReviewer._execute_cite_tool(pkg, "not-a-dict")
+    assert "error" in ProviderReviewer._execute_cite_tool(pkg, {})
+    assert "error" in ProviderReviewer._execute_cite_tool(
+        pkg, {"path": "src/a.py", "start_line": "1", "end_line": 1}
+    )
+    assert ProviderReviewer._execute_cite_tool(
+        pkg, {"path": "src/a.py", "start_line": 1, "end_line": 1}
+    ) == {"path": "src/a.py", "start_line": 1, "end_line": 1, "excerpt": "bad = True"}
+
+
+def test_execute_openai_tool_call_handles_unknown_tool_and_malformed_json() -> None:
+    pkg = package()
+    reviewer = ProviderReviewer(
+        binding(Transport.OPENAI_COMPATIBLE), "secret", RoleRubric("correctness", "review")
+    )
+
+    assert "error" in reviewer._execute_openai_tool_call(pkg, "not-a-dict")
+    assert "error" in reviewer._execute_openai_tool_call(
+        pkg, {"function": {"name": "other_tool", "arguments": "{}"}}
+    )
+    assert "error" in reviewer._execute_openai_tool_call(
+        pkg, {"function": {"name": "cite_patch_lines", "arguments": "not json"}}
+    )

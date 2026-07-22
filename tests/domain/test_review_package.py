@@ -113,6 +113,35 @@ def test_frozen_patch_evidence_is_bounded_digest_verified_and_cites_exact_head_l
     )
 
 
+def test_lookup_returns_authoritative_citation_or_a_structured_error() -> None:
+    """lookup() is the tool executor's source of truth: a reviewer's cite-tool call
+    reads from this directly, so its result must be correct by construction and
+    never raise on bad input — an out-of-range or deleted-line request must come
+    back as a normal {"error": ...} payload the reviewer can recover from."""
+    patch = (
+        "diff --git a/src/service.py b/src/service.py\n"
+        "--- a/src/service.py\n"
+        "+++ b/src/service.py\n"
+        "@@ -1,2 +1,3 @@\n"
+        " context = True\n"
+        "+timeout = 60\n"
+        "-old = True\n"
+        " return context\n"
+    )
+    evidence = FrozenPatchEvidence.from_patch(patch)
+
+    assert evidence.lookup("src/service.py", 1, 2) == {
+        "path": "src/service.py",
+        "start_line": 1,
+        "end_line": 2,
+        "excerpt": "context = True\ntimeout = 60",
+    }
+    assert "error" in evidence.lookup("src/service.py", 0, 1)
+    assert "error" in evidence.lookup("src/service.py", 2, 1)
+    assert "error" in evidence.lookup("src/service.py", 1, 500)
+    assert "error" in evidence.lookup("other.py", 1, 1)
+
+
 def test_numbered_patch_prefixes_head_side_lines_and_leaves_everything_else_untouched() -> None:
     """A reviewer model must copy a citation's line number rather than derive it by
     counting through hunk headers itself — smaller models were observed doing that
